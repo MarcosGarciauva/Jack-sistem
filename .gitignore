@@ -1,0 +1,16 @@
+node_modules
+dist
+.env.local
+*.tsbuildinfo
+.claude/
+.agents/
+.clinerules/
+.cursor/
+.opencode/
+.windsurf/
+AGENTS.md
+skills-lock.json
+supabase/.temp/
+supabase/backups/
+*.dump
+*.backup
