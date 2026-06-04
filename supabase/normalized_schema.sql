@@ -267,8 +267,20 @@ begin
   select
     appointment->>'id',
     p_business_id,
-    appointment->>'clientId',
-    appointment->>'employeeId',
+    case
+      when exists (
+        select 1 from business_clients c
+        where c.id = appointment->>'clientId' and c.business_id = p_business_id
+      ) then appointment->>'clientId'
+      else null
+    end,
+    case
+      when exists (
+        select 1 from business_employees e
+        where e.id = appointment->>'employeeId' and e.business_id = p_business_id
+      ) then appointment->>'employeeId'
+      else null
+    end,
     appointment->>'service',
     (appointment->>'date')::date,
     (appointment->>'time')::time,

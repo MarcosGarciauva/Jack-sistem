@@ -26,8 +26,10 @@ create table if not exists business_cash_cuts (
   updated_at timestamptz not null default now()
 );
 
--- Un corte por día por negocio (cerrar de nuevo el mismo día actualiza la foto).
-create unique index if not exists business_cash_cuts_business_date_idx
+-- Índice de consulta por día. La unicidad de "un corte activo por día" se aplica en
+-- normalize_cash_cuts.sql con un índice parcial (deleted_at is null), para no romper
+-- instalaciones existentes con duplicados históricos.
+create index if not exists business_cash_cuts_business_date_lookup_idx
   on business_cash_cuts(business_id, cut_date);
 
 create index if not exists business_cash_cuts_business_idx

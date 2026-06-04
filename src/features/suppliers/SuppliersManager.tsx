@@ -14,6 +14,8 @@ import { Check, ChevronRight, MessageCircle, Plus, Trash2, X } from "lucide-reac
 import { JEmpty } from "../../components/Editorial";
 import { PhoneInput, formatPhoneDisplay } from "../../components/PhoneInput";
 import { uid } from "../../lib/format";
+import { databaseService } from "../../services/databaseService";
+import { monitoringService } from "../../services/monitoringService";
 import { whatsappService } from "../../services/whatsappService";
 import type { AppState, Supplier } from "../../types";
 
@@ -29,10 +31,12 @@ interface Draft {
 }
 
 export function SuppliersManager({
+  businessId,
   state,
   setState,
   onToast
 }: {
+  businessId: string;
   state: AppState;
   setState: (s: AppState) => void;
   onToast: (msg: string) => void;
@@ -92,6 +96,13 @@ export function SuppliersManager({
     if (!draft || draft.mode !== "edit") return;
     if (!confirm(`¿Eliminar al proveedor "${draft.name}"?`)) return;
     persist(suppliers.filter((x) => x.id !== draft.id));
+    // #D: soft-delete por id en la tabla normalizada para que no reaparezca.
+    if (businessId) {
+      const supplierId = draft.id;
+      void databaseService
+        .softDeleteSupplier(businessId, supplierId)
+        .catch((error) => monitoringService.captureError(error, "supplier.softDelete", { businessId, supplierId }));
+    }
     setDraft(null);
     onToast("Proveedor eliminado");
   };

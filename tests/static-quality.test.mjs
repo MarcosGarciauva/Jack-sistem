@@ -26,12 +26,16 @@ test("Web reservations live as a subsection inside Citas (P2)", () => {
   assert.doesNotMatch(app, /"dashboard" \| "calendar" \| "appointments" \| "reservations"/);
 });
 
-test("Web reservation confirmation flow converts to a normal cita (P3)", () => {
+test("WhatsApp button only contacts; confirmation is manual (P3, revisado)", () => {
   const app = read("src/App.tsx");
-  // Confirmar pasa la reserva a status "confirmed" y avisa por WhatsApp (manual).
-  assert.match(app, /confirmReservationWhatsApp/);
-  assert.match(app, /onConfirmWhatsApp/);
-  assert.match(app, /Confirmar y avisar por WhatsApp/);
+  // El botón de WhatsApp SOLO contacta (abre wa.me). NO confirma la cita por sí solo.
+  assert.match(app, /Contactar por WhatsApp/);
+  // Se eliminó el flujo que confirmaba automáticamente al avisar por WhatsApp.
+  assert.doesNotMatch(app, /confirmReservationWhatsApp/);
+  assert.doesNotMatch(app, /onConfirmWhatsApp/);
+  assert.doesNotMatch(app, /Confirmar y avisar por WhatsApp/);
+  // La confirmación sigue siendo posible, pero MANUAL, vía el cambio de estado.
+  assert.match(app, /updateAppointmentStatus/);
 });
 
 test("Appointment actions live in a centered detail modal, not the table (P4/P6)", () => {

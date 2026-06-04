@@ -33,11 +33,16 @@ const byCode = (code: CountryCode) => COUNTRIES.find((c) => c.code === code) ?? 
 export function parsePhone(value: string): { country: CountryCode; national: string } {
   const digits = (value || "").replace(/\D/g, "");
   if (!digits) return { country: "MX", national: "" };
-  // México: 521 + 10 (legacy WhatsApp), 52 + 10, o 10 sueltos.
+  // IMPORTANTE: el código de país se quita aunque el número esté A MEDIAS (longitud
+  // parcial). Si solo se quitara al largo exacto, al teclear el `52`/`1` quedaría
+  // dentro del "nacional" y buildPhone lo volvería a anteponer → bola de nieve
+  // "5252525252…". Por eso aquí usamos `<=` y no `===`.
+  // México: 521 + hasta 10 (legacy WhatsApp). Solo el caso completo (13) lleva el 1
+  // extra; un valor de 12 que empiece con 521 es "52" + nacional que inicia en 1.
   if (digits.startsWith("521") && digits.length === 13) return { country: "MX", national: digits.slice(3) };
-  if (digits.startsWith("52") && digits.length === 12) return { country: "MX", national: digits.slice(2) };
-  // EE.UU.: 1 + 10.
-  if (digits.startsWith("1") && digits.length === 11) return { country: "US", national: digits.slice(1) };
+  if (digits.startsWith("52") && digits.length <= 12) return { country: "MX", national: digits.slice(2) };
+  // EE.UU.: 1 + hasta 10.
+  if (digits.startsWith("1") && digits.length <= 11) return { country: "US", national: digits.slice(1) };
   if (digits.length === 10) return { country: "MX", national: digits };
   return { country: "MX", national: digits.slice(-10) };
 }

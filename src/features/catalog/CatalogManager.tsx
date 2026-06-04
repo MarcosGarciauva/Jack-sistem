@@ -14,6 +14,8 @@
 import { useMemo, useRef, useState } from "react";
 import { ArrowUpDown, Check, ChevronRight, Download, Plus, Trash2, Upload, X } from "lucide-react";
 import { JEmpty } from "../../components/Editorial";
+import { databaseService } from "../../services/databaseService";
+import { monitoringService } from "../../services/monitoringService";
 import { formatCurrency, uid } from "../../lib/format";
 import type {
   AppState,
@@ -52,10 +54,12 @@ interface Draft {
 const COST_LABEL: Record<CostType, string> = { net: "Neto", gross: "Bruto" };
 
 export function CatalogManager({
+  businessId,
   state,
   setState,
   onToast
 }: {
+  businessId: string;
   state: AppState;
   setState: (s: AppState) => void;
   onToast: (msg: string) => void;
@@ -185,8 +189,26 @@ export function CatalogManager({
   const removeFromDraft = () => {
     if (!draft || draft.mode !== "edit") return;
     if (!confirm(`¿Eliminar "${draft.name}" del catálogo?`)) return;
-    if (draft.itemType === "service") persist({ services: services.filter((s) => s.id !== draft.id) });
-    else persist({ products: products.filter((p) => p.id !== draft.id) });
+    if (draft.itemType === "service") {
+      persist({ services: services.filter((s) => s.id !== draft.id) });
+      // #B: desactivar en la tabla normalizada (active=false) para que no reaparezca
+      // al recargar. La fila se conserva (citas viejas la referencian por nombre).
+      if (businessId) {
+        const serviceId = draft.id;
+        void databaseService
+          .deactivateService(businessId, serviceId)
+          .catch((error) => monitoringService.captureError(error, "service.deactivate", { businessId, serviceId }));
+      }
+    } else {
+      persist({ products: products.filter((p) => p.id !== draft.id) });
+      // #C: desactivar el producto en la tabla normalizada para que no reaparezca.
+      if (businessId) {
+        const productId = draft.id;
+        void databaseService
+          .deactivateProduct(businessId, productId)
+          .catch((error) => monitoringService.captureError(error, "product.deactivate", { businessId, productId }));
+      }
+    }
     setDraft(null);
     onToast("Eliminado del catálogo");
   };

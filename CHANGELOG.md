@@ -4,6 +4,291 @@ Todas las notas relevantes de cambios del sistema. Las versiones siguen un esque
 informal por "olas" de prioridades (P1–P11). El formato se inspira en
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Sin versión] — Consolidación setup + backfill Supabase (2026-06-03)
+
+Se cerró la migración de lectura normalizada A-E a nivel operativo.
+
+### Changed
+
+- `supabase/setup_full.sql` ahora incluye también:
+  - `normalize_clients_appointments.sql`
+  - `normalize_catalog.sql`
+  - `normalize_suppliers.sql`
+  - `normalize_cash_cuts.sql`
+- `cash_cuts.sql` ya no crea el índice único incondicional
+  `business_cash_cuts_business_date_idx`, porque fallaba con datos existentes
+  duplicados por negocio/día. Ahora crea un índice normal de lookup y la unicidad
+  real vive en `normalize_cash_cuts.sql` como índice único parcial
+  `where deleted_at is null`.
+- `normalize_cash_cuts.sql` ahora soft-deletea duplicados activos por negocio/día,
+  conservando vivo el corte más reciente antes de crear el índice único parcial.
+- `migrate_app_state_to_normalized` ahora tolera citas con `clientId` o `employeeId`
+  vacío/no válido: inserta `client_id`/`employee_id` como `null` si no existe la fila
+  referenciada. Esto evita que datos históricos sucios bloqueen el backfill.
+
+### Applied in Supabase
+
+- Se ejecutó `supabase/setup_full.sql` contra el proyecto enlazado.
+- Se ejecutaron backfills para todos los negocios existentes:
+  - `migrate_app_state_to_normalized(id)`
+  - `migrate_catalog_to_normalized(id)`
+  - `migrate_suppliers_to_normalized(id)`
+  - `migrate_cash_cuts_to_normalized(id)`
+
+### Verification
+
+- Negocios detectados:
+  - `Jack` (`slug: jack`)
+  - `TerraMar` (`slug: terramar`)
+- Conteos post-backfill:
+  - Jack: 9 clientes, 11 citas, 4 servicios, 3 empleados, 2 categorías, 0 productos,
+    1 proveedor, 2 cortes de caja.
+  - TerraMar: 0 en todas las entidades normalizadas (negocio nuevo/sin operación).
+- Checks de consistencia:
+  - cortes activos duplicados por negocio/día: 0
+  - citas activas sin cliente: 0
+  - citas activas sin empleado: 6 (dato histórico tolerado; quedan sin asignar y
+    deben reasignarse manualmente si el negocio las necesita operativas).
+
+## [Sin versión] — WhatsApp solo contacta, confirmación manual (2026-06-03)
+
+Cambio de producto en la ventana de detalle de cita. El botón de WhatsApp dejaba la
+cita en `confirmed` al avisar al cliente; eso confirmaba por error cuando el cliente
+solo preguntaba o se equivocaba. Ahora el botón **solo contacta** (abre `wa.me`) y la
+confirmación es manual con los botones de "Estado de la cita". Build y tests (9/9) verdes.
+
+### Changed
+
+- `AppointmentDetailModal` (`src/App.tsx`): para reservas web pendientes ya NO se
+  muestra "Confirmar y avisar por WhatsApp". Se muestra un único botón **"Contactar por
+  WhatsApp"** (resaltado si es reserva web pendiente) que abre `wa.me` sin cambiar el
+  estado. Se eliminó la función `confirmReservationWhatsApp` y el prop `onConfirmWhatsApp`.
+- La confirmación sigue disponible, pero MANUAL, vía los botones grandes de estado
+  (`onStatus` → `updateAppointmentStatus`).
+- Test estático `static-quality.test.mjs` actualizado a la nueva decisión.
+
+## [Sin versión] — Corrección PhoneInput: dígitos se duplicaban (2026-06-03)
+
+`PhoneInput` mostraba "5252525252…" al escribir. `parsePhone` solo quitaba el código de
+país (`52`/`1`) cuando el número tenía el largo EXACTO; con el número a medias el código
+quedaba dentro del "nacional" y `buildPhone` lo volvía a anteponer (bola de nieve). Fix:
+`parsePhone` ahora quita el código de país aunque el número esté incompleto (`<=12` MX,
+`<=11` US), conservando el legacy `521`+10. Un solo archivo: `src/components/PhoneInput.tsx`.
+Aplica a todas las secciones (mismo componente). Build y tests (9/9) verdes.
+
+## [Sin versión] — Normalización lote E: corte de caja (#2/#6, cierre) (2026-06-01)
+
+Quinto y ÚLTIMO mini-lote de la fundación de datos. El corte de caja pasa a leerse de
+`business_cash_cuts` con fallback por entidad y soft-delete. Con esto, clientes, citas,
+servicios, empleados, productos/categorías, proveedores y cortes ya tienen las tablas
+normalizadas como fuente principal de lectura. Cortes a NIVEL RAÍZ de AppState + RLS por
+negocio → nunca al sitio público. Sin cambios visuales, roles/login intactos. Build y
+tests (9/9) verdes.
+
+### SQL a correr (en orden)
+
+1. **`supabase/cash_cuts.sql`** — si aún no se corrió: crea `business_cash_cuts` + RLS.
+2. **`supabase/normalize_cash_cuts.sql`** — nuevo: agrega las columnas por método/retiro
+   (P7: `cash_amount`, `card_credit`, `card_debit`, `transfer`, `total_received`,
+   `expected_total`, `difference`, `withdrawal`, `cash_remaining`) + `deleted_at` + índice
+   parcial, y el RPC `migrate_cash_cuts_to_normalized(business_id)` para backfill.
+   Idempotente, no destructivo. Correr por cada negocio.
+
+### Changed (persistencia)
+
+- **Carga de cortes normalizada** (`loadNormalizedState`): fetch separado y tolerante,
+  filtra `deleted_at is null`, mapea TODOS los campos por método/retiro, fallback por
+  entidad a `app_state.cashCuts`. `loadBusinessState` ya NO sobrescribe `cashCuts` desde
+  el fallback (lo resuelve el loader).
+- **Espejo de cortes** (`mirrorNormalizedState`): upsert por id (un corte por fecha, id
+  estable por fecha) con los campos completos; NO manda `deleted_at` → un corte borrado
+  no resucita.
+- **Borrar corte = soft-delete por id**: `databaseService.softDeleteCashCut` desde
+  `CashManager.removeCut`. `CashManager` recibe `businessId`.
+
+### Fixed (post-verificación en vivo)
+
+- **No se podían crear/subir cortes de días anteriores.** El índice único original
+  `business_cash_cuts_business_date_idx` era INCONDICIONAL sobre `(business_id, cut_date)`.
+  Como el borrado es soft-delete (la fila queda con `deleted_at`), esa fila seguía
+  ocupando el día y bloqueaba recrear un corte para una fecha ya usada/borrada → el
+  `insert` del espejo lanzaba error y, como el loader prefiere la tabla, el corte
+  (solo en `app_state`) no aparecía. Fix en `normalize_cash_cuts.sql`: se reemplaza por
+  un índice único PARCIAL `where deleted_at is null` (un corte ACTIVO por día; los
+  borrados ya no bloquean). **Acción: re-correr `supabase/normalize_cash_cuts.sql`.**
+
+### Riesgos / pendiente
+
+- Con el índice parcial puede haber varias filas por fecha (1 activa + N borradas); el
+  loader filtra `deleted_at is null`, así que siempre se ve solo la activa.
+- **Migración #2/#6 (lectura) completa** para todas las entidades en alcance. PENDIENTE
+  a futuro: escribir DIRECTO a tablas por entidad (hoy se sigue escribiendo el `app_state`
+  completo + espejo), bandera `normalized_ready` por negocio, y eventual retiro de
+  `app_state` como almacenamiento. No incluido aquí a propósito.
+
+## [Sin versión] — Normalización lote D: proveedores (#2/#6) (2026-06-01)
+
+Cuarto mini-lote de la fundación de datos. Los proveedores pasan a leerse de
+`business_suppliers` con fallback por entidad y soft-delete. Siguen a NIVEL RAÍZ de
+AppState (fuera de config) y la tabla tiene RLS por negocio → nunca se exponen al sitio
+público. NO migra corte de caja (lote E). Sin cambios visuales, roles/login intactos.
+Build y tests (9/9) verdes.
+
+### SQL a correr (en orden)
+
+1. **`supabase/suppliers.sql`** — si aún no se corrió: crea `business_suppliers` + RLS.
+2. **`supabase/normalize_suppliers.sql`** — nuevo: agrega `deleted_at` + índice parcial
+   y el RPC `migrate_suppliers_to_normalized(business_id)` para backfill desde
+   `app_state.suppliers`. Idempotente, no destructivo. Correr por cada negocio.
+
+### Changed (persistencia)
+
+- **Carga de proveedores normalizada** (`loadNormalizedState`): fetch separado y
+  tolerante a tabla ausente, filtra `deleted_at is null`, fallback por entidad a
+  `app_state.suppliers`. `loadBusinessState` ya NO sobrescribe `suppliers` desde el
+  fallback (lo resuelve el loader); `cashCuts` sí se sigue preservando del fallback
+  (lote E pendiente).
+- **Espejo de proveedores** (`mirrorNormalizedState`): upsert tolerante; NO manda
+  `deleted_at` → un proveedor borrado no resucita aunque una sesión vieja lo re-espeje.
+- **Borrar proveedor = soft-delete por id**: `databaseService.softDeleteSupplier`
+  llamado desde `SuppliersManager.removeFromDraft`. `SuppliersManager` recibe `businessId`.
+
+### Riesgos / pendiente
+
+- Mismo patrón anti-resurrección que clientes/citas. `deleted_at` se agrega vía
+  `normalize_suppliers.sql` (la tabla no lo tenía).
+- Falta: corte de caja (lote E), aún solo en `app_state` (raíz).
+
+## [Sin versión] — Normalización lote C: productos + categorías (#2/#6) (2026-06-01)
+
+Tercer mini-lote de la fundación de datos. El catálogo (productos + categorías) pasa a
+leerse de las tablas normalizadas con fallback por entidad. NO migra proveedores ni
+corte de caja (lotes D/E). Sin cambios visuales, roles/login intactos. Build y tests
+(9/9) verdes.
+
+### SQL a correr (en este orden)
+
+1. **`supabase/catalog_products.sql`** — si aún no se corrió: crea
+   `business_product_categories` y `business_products` + RLS por negocio. Idempotente.
+2. **`supabase/normalize_catalog.sql`** — nuevo: RPC `migrate_catalog_to_normalized(business_id)`
+   para backfillear el catálogo de `app_state.config` a las tablas. Idempotente, no
+   destructivo. Correr por cada negocio existente.
+
+### Changed (persistencia)
+
+- **Carga del catálogo normalizada con fallback por entidad** (`loadNormalizedState`).
+  Las categorías y productos se leen de `business_product_categories` /
+  `business_products` (productos filtran `active = true`). Fetch **separado y tolerante**:
+  si las tablas de catálogo no existen todavía, NO se rompe la carga de citas/clientes;
+  se cae a `app_state` solo para el catálogo. Si una tabla está vacía → fallback por
+  entidad a `app_state`.
+- **Espejo del catálogo** (`mirrorNormalizedState`). Al guardar se upsertean categorías
+  (primero, por la FK `category_id`) y luego productos, secuencial y tolerante a tablas
+  ausentes. Productos NO mandan `active` en el upsert → mismo patrón anti-resurrección
+  que servicios/citas.
+- **Borrar producto = desactivar por id**: `databaseService.deactivateProduct` llamado
+  desde `CatalogManager.removeFromDraft` (set `active=false`); la fila se conserva.
+- Categorías: no hay borrado en la UI (solo crear/usar), así que solo se upsertean.
+
+### Riesgos / pendiente
+
+- Igual que servicios: dos admins simultáneos podrían chocar; el anti-resurrección cubre
+  el borrado. Si una tabla de catálogo quedó *parcialmente* poblada, se muestra lo
+  normalizado (mitiga el `mirror` al primer guardado o el RPC de backfill).
+- Faltan: proveedores (lote D) y corte de caja (lote E), aún solo en `app_state`.
+
+## [Sin versión] — Normalización lote B: servicios + empleados (#2/#6) (2026-06-01)
+
+Segundo mini-lote de la fundación de datos. Servicios y empleados ya se leían de las
+tablas normalizadas (loader normalizado-primario + fallback por entidad del lote
+anterior); este lote cierra el **delete-sync seguro** para ambos. NO migra productos,
+proveedores ni corte de caja. Sin SQL nuevo (las tablas ya existen). Sin cambios
+visuales, sin tocar roles/login. Build y tests (9/9) verdes.
+
+### Changed (persistencia)
+
+- **Servicios: borrar = desactivar por id.** `business_services` se filtra por
+  `active = true` en la carga. Borrar un servicio ahora llama
+  `databaseService.deactivateService(businessId, id)` (set `active=false`) desde
+  `CatalogManager.removeFromDraft`; la fila se conserva (las citas viejas lo
+  referencian por nombre). `CatalogManager` recibe ahora `businessId`.
+- **Espejo de servicios sin forzar `active`.** `mirrorNormalizedState` ya no manda
+  `active: true` en el upsert de servicios: al insertar usa el default (true) y al
+  actualizar NO toca `active`, así un servicio desactivado no resucita aunque una
+  sesión vieja lo vuelva a espejar (mismo patrón anti-resurrección que `deleted_at`).
+  Además ahora espeja los valores reales de depósito (`deposit_required` /
+  `deposit_amount`) en vez de forzar 0/false (corrige pérdida de depósito al guardar).
+- **Empleados fuera del espejo.** `mirrorNormalizedState` ya NO upsertea empleados. La
+  fuente de verdad es el Edge Function `admin-manage-user` (crea/edita/borra la fila en
+  `business_employees`). Antes, un guardado de admin con sesión vieja podía RESUCITAR un
+  empleado borrado vía el espejo. La carga normalizada de empleados no cambia.
+
+### Riesgos / pendiente
+
+- Servicios no tienen escritor concurrente público (a diferencia de citas), pero dos
+  admins simultáneos podrían chocar; el patrón anti-resurrección cubre el caso de
+  borrado. 
+- Productos, proveedores y corte de caja siguen SOLO en `app_state` (sus tablas existen
+  pero el front aún no las lee/escribe). Son los lotes C/D/E.
+
+## [Sin versión] — Normalización mini-lote: clientes + citas (#2/#6) (2026-06-01)
+
+Primer mini-lote seguro de la fundación de datos. **Solo** clientes y citas: las
+tablas normalizadas pasan a ser la **fuente principal** de lectura, con fallback por
+entidad a `app_state` y borrado real con `deleted_at`. NO migra empleados, servicios,
+catálogo, proveedores ni corte de caja. Sin DROP, sin borrar datos, sin cambios
+visuales, sin tocar roles/login. Build y tests (9/9) en verde.
+
+### SQL a correr (idempotente, no destructivo)
+
+- **`supabase/normalize_clients_appointments.sql`** — garantiza `deleted_at` en
+  `business_clients` y `business_appointments` (por si una BD vieja no lo tenía) y
+  agrega índices parciales `where deleted_at is null` para la carga normalizada.
+  Correr **después** de `normalized_schema.sql`.
+
+### Changed (persistencia)
+
+- **Carga normalizada con fallback POR ENTIDAD** (`databaseService.loadNormalizedState`).
+  Antes: si había cualquier dato normalizado, se usaba la capa normalizada para TODO
+  (una tabla vacía → lista vacía aunque `app_state` tuviera datos). Ahora cada entidad
+  decide por separado: clientes y citas se leen de las tablas normalizadas si tienen
+  filas; si están vacías, caen a `app_state` solo para esa entidad. Servicios y
+  empleados siguen igual (normalizado si hay, si no `app_state`) — no se migran aquí.
+- **Borrado de cita = soft-delete explícito** (`databaseService.softDeleteAppointment`,
+  llamado desde `deleteAppointment` en `App.tsx`). Marca `deleted_at` **solo en el id
+  borrado**. El loader filtra `deleted_at is null`, así la cita no reaparece al
+  recargar. Se agregó también `softDeleteClient` (sin caller de UI por ahora; los
+  clientes no se borran desde la interfaz).
+- **Create/edit siguen por el espejo existente**: `saveBusinessState` escribe
+  `app_state` y hace `upsert` a las tablas normalizadas (clientes y citas incluidas).
+  El payload del upsert NO incluye `deleted_at`, así un registro soft-borrado nunca
+  resucita aunque una sesión desactualizada lo vuelva a espejar.
+
+### Por qué NO se borra por ausencia (anti-landmine)
+
+Se evitó a propósito el patrón "borra de la tabla lo que no esté en `app_state`": una
+reserva pública entrante (escrita por `public-booking` directo a la tabla) no está en
+la memoria del admin, y un guardado del admin la habría marcado como borrada. Con
+soft-delete por id explícito + lectura normalizada-primaria, la reserva pública
+sobrevive aunque el `app_state` del admin esté desactualizado.
+
+### `public-booking`
+
+- Sin cambios: ya escribe `business_clients` + `business_appointments` con los campos
+  correctos y `deleted_at` por defecto en null. WhatsApp sigue manual (`wa.me`).
+
+### Pendiente / riesgos
+
+- **Migración parcial**: el fallback por entidad solo dispara si la tabla está
+  *totalmente* vacía. Si un negocio tiene citas en `app_state` y la tabla normalizada
+  quedó *parcialmente* poblada, se mostrará lo normalizado. Mitigación: `mirror`
+  corre en cada guardado (completa la tabla al primer save) o correr el RPC
+  `migrate_app_state_to_normalized(business_id)` para backfill.
+- `app_state` sigue como espejo/compat; el admin que guarda con sesión vieja deja el
+  JSON `app_state` temporalmente desfasado (las lecturas ya no dependen de él para
+  clientes/citas).
+- Aún NO migrados: empleados, servicios, catálogo, proveedores, corte de caja.
+
 ## [Sin versión] — Endurecer public-booking (#8) (2026-06-01)
 
 Lote acotado sobre la Edge Function pública `public-booking`. **No** migra la
@@ -311,7 +596,11 @@ funcionalidades previas y la compatibilidad con `businesses.app_state`.
 
 ### Notas
 
-- `App.tsx` sigue siendo grande (deuda técnica conocida) y el bundle supera 500 kB;
-  pendiente code-splitting / lazy loading.
-- Las tablas normalizadas de catálogo, corte de caja y proveedores existen como
-  capa futura; el frontend todavía persiste en `app_state`.
+- `App.tsx` sigue siendo grande (deuda técnica conocida), pero el code splitting ya
+  redujo el chunk inicial bajo el umbral de advertencia de Vite.
+- Las tablas normalizadas de catálogo, corte de caja y proveedores ya participan en
+  la lectura normalizada con fallback por entidad. La escritura directa por entidad
+  sigue pendiente; por ahora el frontend persiste `app_state` + espejo.
+- `setup_full.sql` ya consolida los SQL de normalización A-E. En una instalación
+  existente se recomienda correrlo completo o correr los archivos granulares en el
+  orden documentado en `CLAUDE.md`.

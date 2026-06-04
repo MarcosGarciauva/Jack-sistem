@@ -21,6 +21,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Check, Download, Lock, Trash2, X } from "lucide-react";
 import { PaymentBadge, StatusBadge } from "../../components/Badge";
 import { JEmpty } from "../../components/Editorial";
+import { databaseService } from "../../services/databaseService";
+import { monitoringService } from "../../services/monitoringService";
 import { formatCurrency, formatLongDate, uid } from "../../lib/format";
 import type { AppState, CashCut } from "../../types";
 
@@ -44,12 +46,14 @@ function downloadCsv(filename: string, header: string[], lines: (string | number
 const num = (s: string) => Number(s) || 0;
 
 export function CashManager({
+  businessId,
   state,
   setState,
   today,
   closedBy,
   onToast
 }: {
+  businessId: string;
   state: AppState;
   setState: (s: AppState) => void;
   today: string;
@@ -158,6 +162,13 @@ export function CashManager({
   const removeCut = (cut: CashCut) => {
     if (!confirm(`¿Eliminar el corte de ${formatLongDate(cut.date)}?`)) return;
     persist(cuts.filter((c) => c.id !== cut.id));
+    // #E: soft-delete por id en la tabla normalizada para que no reaparezca.
+    if (businessId) {
+      const cutId = cut.id;
+      void databaseService
+        .softDeleteCashCut(businessId, cutId)
+        .catch((error) => monitoringService.captureError(error, "cashCut.softDelete", { businessId, cutId }));
+    }
     onToast("Corte eliminado");
   };
 

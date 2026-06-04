@@ -669,6 +669,13 @@ function BusinessDashboard({
   const deleteAppointment = (id: string) => {
     if (!confirm("Eliminar esta cita?")) return;
     setBusiness({ ...businessState, appointments: businessState.appointments.filter((a) => a.id !== id) });
+    // #2/#5: soft-delete explícito en la tabla normalizada para que la cita no
+    // reaparezca al recargar (la fuente principal son las tablas normalizadas).
+    if (session.businessId) {
+      void databaseService
+        .softDeleteAppointment(session.businessId, id)
+        .catch((error) => monitoringService.captureError(error, "appointment.softDelete", { businessId: session.businessId, id }));
+    }
     onToast("Cita eliminada");
   };
 
@@ -750,12 +757,6 @@ function BusinessDashboard({
       businessState.config
     );
     onToast(opened ? "WhatsApp abierto" : "El cliente no tiene teléfono");
-  };
-
-  // P8: confirma la reserva web Y abre WhatsApp para avisar al cliente (manual).
-  const confirmReservationWhatsApp = (appointment: Appointment) => {
-    updateAppointmentStatus(appointment.id, "confirmed");
-    openAppointmentWhatsApp(appointment);
   };
 
   const messageClient = (client: Client) => {
@@ -1004,14 +1005,15 @@ function BusinessDashboard({
             </div>
           )}
           {section === "catalog" && (
-            <CatalogManager state={businessState} setState={setBusiness} onToast={onToast} />
+            <CatalogManager businessId={session.businessId ?? ""} state={businessState} setState={setBusiness} onToast={onToast} />
           )}
           {section === "suppliers" && (
-            <SuppliersManager state={businessState} setState={setBusiness} onToast={onToast} />
+            <SuppliersManager businessId={session.businessId ?? ""} state={businessState} setState={setBusiness} onToast={onToast} />
           )}
           {section === "stats" && <StatsManager state={businessState} today={today} />}
           {section === "cash" && (
             <CashManager
+              businessId={session.businessId ?? ""}
               state={businessState}
               setState={setBusiness}
               today={today}
@@ -1080,11 +1082,6 @@ function BusinessDashboard({
           onDelete={(id) => {
             deleteAppointment(id);
             setActiveAppointment(null);
-          }}
-          onConfirmWhatsApp={() => {
-            confirmReservationWhatsApp(activeAppointment);
-            // Tras confirmar, la reserva web pasa a Confirmada y deja de ser "por confirmar".
-            setActiveAppointment({ ...activeAppointment, status: "confirmed" });
           }}
         />
       )}
@@ -1841,8 +1838,7 @@ function AppointmentDetailModal({
   onStatus,
   onPayment,
   onWhatsApp,
-  onDelete,
-  onConfirmWhatsApp
+  onDelete
 }: {
   appointment: Appointment;
   client?: Client;
@@ -1855,7 +1851,6 @@ function AppointmentDetailModal({
   onPayment: (status: PaymentStatus) => void;
   onWhatsApp: () => void;
   onDelete: (id: string) => void;
-  onConfirmWhatsApp: () => void;
 }) {
   const isPendingWeb = appointment.source === "public_site" && appointment.status === "pending";
   const statusChoices = appointmentStatusChoices(appointment);
@@ -1942,13 +1937,12 @@ function AppointmentDetailModal({
           )}
           <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button className="j-btn" onClick={() => onEdit(appointment)}><Pencil size={15} /> Editar</button>
-            {isPendingWeb ? (
-              <button className="j-btn j-btn-primary" onClick={onConfirmWhatsApp}>
-                <Check size={15} /> Confirmar y avisar por WhatsApp
-              </button>
-            ) : (
-              <button className="j-btn" onClick={onWhatsApp}><MessageCircle size={15} /> WhatsApp</button>
-            )}
+            {/* El botón de WhatsApp SOLO contacta (abre wa.me); NO confirma la cita.
+                La confirmación es manual con los botones de "Estado de la cita" de
+                arriba, para no confirmar por error al solo contactar al cliente. */}
+            <button className={"j-btn" + (isPendingWeb ? " j-btn-primary" : "")} onClick={onWhatsApp}>
+              <MessageCircle size={15} /> Contactar por WhatsApp
+            </button>
           </div>
         </div>
       </div>

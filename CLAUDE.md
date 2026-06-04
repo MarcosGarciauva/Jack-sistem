@@ -20,8 +20,9 @@ Estado actual del proyecto:
 - Sitio publico de reservas en `/p/:slug` como paquete add-on.
 - Reservas publicas entran al dashboard como `source = "public_site"` y estado `pending`.
 - "Reservaciones web" NO es una seccion de nivel superior: es una PESTAÑA dentro de
-  Citas (estado `appointmentsTab`). Las reservas web pendientes se confirman con
-  "Confirmar y avisar por WhatsApp", que pasa la cita a `confirmed` y abre `wa.me`.
+  Citas (estado `appointmentsTab`). El botón de WhatsApp en el detalle SOLO contacta
+  (abre `wa.me`); NO confirma la cita. La confirmación es MANUAL con los botones de
+  "Estado de la cita" (para no confirmar por error al solo contactar al cliente).
 - WhatsApp principal es manual mediante `wa.me`; no se debe usar Twilio/Meta como flujo principal por ahora.
 - Selector de pais reutilizable para telefonos (Mexico +52, EE.UU. +1) en `components/PhoneInput.tsx`.
 - Mercado Pago fue eliminado del flujo y del codigo local.
@@ -50,8 +51,8 @@ Funcionalidades principales actuales:
   ("Más recientes" / "Nombre del cliente"). El filtro por origen se eliminó.
 - Ficha de cliente como modal centrado con historial de citas (P9).
 - Reservaciones web como PESTAÑA dentro de Citas (no seccion de nivel superior). La
-  bandeja de pendientes es solo lectura; el detalle y "Confirmar y avisar por
-  WhatsApp" viven en la ventana centrada.
+  bandeja de pendientes es solo lectura; el detalle vive en la ventana centrada. El
+  botón "Contactar por WhatsApp" solo abre `wa.me`; confirmar es manual (estado).
 - Crear, editar, eliminar y cambiar estado de citas. Todas las acciones importantes
   (estado, pago, editar, eliminar, WhatsApp) viven en una VENTANA DE DETALLE CENTRADA
   (`AppointmentDetailModal`, patron `j-modal`); las tablas son solo lectura. El estado
@@ -279,7 +280,8 @@ Servicios externos:
   employees y appointments) jamas los filtre al sitio publico.
 - El sitio publico es un add-on por negocio y se activa con `businesses.public_site_enabled`.
 - Las reservas publicas entran como `status = "pending"` y `source = "public_site"`.
-- Confirmar/cancelar reserva cambia estado; el contacto con cliente es manual por WhatsApp.
+- Confirmar/cancelar reserva = cambio de estado MANUAL (botones de estado). El botón de
+  WhatsApp NO confirma; solo contacta (abre `wa.me`).
 - El flujo principal de WhatsApp debe abrir `wa.me`, no llamar Edge Functions de Twilio/Meta.
 - Para Mexico, los telefonos de WhatsApp deben normalizarse como `52` + numero de 10 digitos. Si entra `521...`, se limpia a `52...`.
 - `PaymentStatus` esta intencionalmente simplificado a:
@@ -476,9 +478,12 @@ Modulos terminados o funcionales:
 Modulos en desarrollo/transicion:
 
 - Capa normalizada de base de datos:
-  - Tablas y espejo existen.
-  - Frontend todavia conserva `app_state`.
-  - Falta eliminar fallback cuando la migracion sea segura.
+  - Lectura normalizada con fallback por entidad ya cubre clientes, citas,
+    servicios, empleados, productos/categorias, proveedores y corte de caja.
+  - `setup_full.sql` ya incluye los lotes de normalizacion A-E.
+  - Frontend todavia conserva `app_state` como espejo/backward compatibility.
+  - Falta cambiar las escrituras CRUD para escribir directo por entidad.
+  - Falta retirar gradualmente `app_state` cuando la migracion sea segura.
 - Auditoria:
   - Registro existe para cambio de estado/pago.
   - Falta vista de auditoria en UI.
@@ -489,8 +494,33 @@ Modulos en desarrollo/transicion:
   - Existen, pero no son flujo principal.
   - No deben considerarse "activas" a nivel producto.
 - Onboarding:
-  - Invitaciones existen.
-  - Falta wizard completo para crear negocio y configurar primer servicio/equipo.
+  - Ya no usa invitaciones por codigo.
+  - Falta wizard completo para configurar primer servicio, horarios, equipo y sitio publico.
+
+Verificacion Supabase aplicada (2026-06-03):
+
+- Se ejecuto `supabase/setup_full.sql` contra el proyecto enlazado
+  `gdcsuhidiccyfcltrsug`.
+- Se ejecutaron backfills para todos los negocios existentes:
+  - `migrate_app_state_to_normalized(id)`
+  - `migrate_catalog_to_normalized(id)`
+  - `migrate_suppliers_to_normalized(id)`
+  - `migrate_cash_cuts_to_normalized(id)`
+- Negocios encontrados:
+  - Jack (`slug: jack`): 9 clientes, 11 citas, 4 servicios, 3 empleados,
+    2 categorias, 0 productos, 1 proveedor, 2 cortes de caja.
+  - TerraMar (`slug: terramar`): 0 entidades normalizadas (negocio nuevo/sin datos).
+- Checks post-backfill:
+  - cortes activos duplicados por negocio/dia: 0
+  - citas activas sin cliente: 0
+  - citas activas sin empleado: 6
+- Las 6 citas sin empleado vienen de datos historicos con `employeeId` vacio o no
+  valido. El RPC `migrate_app_state_to_normalized` ahora las tolera guardando
+  `employee_id = null`. Si el negocio las necesita operativas, deben reasignarse
+  manualmente desde la UI o con una migracion especifica.
+- `setup_full.sql`, `cash_cuts.sql` y `normalize_cash_cuts.sql` se ajustaron para
+  tolerar cortes duplicados existentes: se soft-deletean duplicados activos y se usa
+  un indice unico parcial para permitir un solo corte activo por negocio/dia.
 
 Modulos que requieren revision:
 
@@ -500,7 +530,8 @@ Modulos que requieren revision:
   esta hecho; falta terminar de extraer las vistas grandes (`LoginScreen`,
   `CalendarView`, `WeeklyView`, `Dashboard`, `NewAppointmentFullScreen`,
   `AppointmentDetailModal`), mas acopladas y dejadas para una fase futura.
-- `databaseService.ts`: hace demasiadas cosas: perfiles, estado, invitaciones, publico, auditoria.
+- `databaseService.ts`: hace demasiadas cosas: perfiles, estado, normalizacion,
+  publico, cuentas, auditoria y espejos.
 - RLS de tablas normalizadas debe revisarse antes de produccion con multiples negocios.
 - `public-booking` todavia actualiza `app_state` completo; puede haber race conditions.
 - `send-reminders` y `send-whatsapp` deben eliminarse o marcarse claramente como futuro si no se usaran.
@@ -512,8 +543,8 @@ Bugs/riesgos conocidos:
 
 - Race condition por guardar `app_state` completo.
 - `App.tsx` demasiado grande y dificil de mantener.
-- Bundle JS grande por falta de code splitting.
-- Capa normalizada todavia no es fuente unica.
+- Bundle JS inicial ya fue reducido con code splitting; mantener vigilancia si vuelve a crecer.
+- Capa normalizada ya es fuente principal de lectura, pero todavia no es fuente unica de escritura.
 - Public booking puede pisar cambios si entra reserva al mismo tiempo que admin guarda.
 - No hay tests E2E reales.
 - No hay monitoreo productivo configurado.
@@ -522,8 +553,8 @@ Bugs/riesgos conocidos:
 
 Mejoras prioritarias:
 
-1. Convertir tablas normalizadas en fuente principal real.
-2. Cambiar operaciones CRUD para escribir directamente en tablas normalizadas.
+1. Cambiar operaciones CRUD para escribir directamente en tablas normalizadas por entidad.
+2. Agregar bandera `normalized_ready` por negocio cuando la migracion este validada.
 3. Dejar `app_state` solo para configuracion o eliminarlo gradualmente.
 4. Dividir `App.tsx`:
    - `features/dashboard`
@@ -601,16 +632,29 @@ a la vez, uno puede sobrescribir el cambio del otro. La solucion correcta es hac
 clientes, empleados, citas, servicios, cortes, proveedores y catalogo usen tablas como
 fuente principal, dejando `app_state` solo para configuracion ligera.
 
-### 2. Datos borrados pueden reaparecer
+Avance (2026-06-01): CLIENTES y CITAS ya son fuente principal de LECTURA (loader
+normalizado con fallback por entidad). `app_state` se mantiene como espejo/compat (se
+sigue escribiendo en cada guardado). Como las lecturas de clientes/citas ya no dependen
+del JSON, una escritura de admin con sesion vieja deja `app_state` desfasado pero NO
+pierde citas/clientes en pantalla (se releen de las tablas). Falta migrar el resto de
+entidades y, a futuro, escribir directo a tablas en vez del JSON completo.
+
+### 2. Datos borrados pueden reaparecer — RESUELTO para citas/clientes (2026-06-01)
 
 Archivo principal:
 
 - `src/services/databaseService.ts`
 
-`mirrorNormalizedState` hace `upsert`, pero no elimina ni marca como borrados los registros
-que ya no existen en `app_state`. Si una cita, cliente o empleado se borra en la UI, puede
-seguir vivo en tablas normalizadas y volver a aparecer al recargar. Resolver con `deleted_at`
-o deletes sincronizados por entidad.
+Estado: en el mini-lote de normalización (clientes + citas) se resolvió para esas dos
+entidades. El borrado de cita ahora hace SOFT-DELETE EXPLÍCITO por id
+(`softDeleteAppointment`, llamado desde `deleteAppointment`) y el loader filtra
+`deleted_at is null`, así la cita no reaparece. Se agregó `softDeleteClient` (aún sin
+caller de UI). NO se usa borrado-por-ausencia (evita borrar reservas públicas entrantes
+si la sesión del admin está vieja). `mirrorNormalizedState` sigue haciendo `upsert` para
+create/edit, sin tocar `deleted_at`, así un registro borrado no resucita.
+
+Pendiente: empleados, servicios, catálogo, proveedores y corte de caja todavía dependen
+del `upsert` sin sincronización de borrado (no se migraron en este lote).
 
 ### 3. Empleados pueden no guardar cambios por RLS
 
@@ -656,10 +700,16 @@ Archivo principal:
 
 - `src/services/databaseService.ts`
 
-Si existen algunos datos normalizados, el loader puede preferir tablas aunque otras entidades
-no esten migradas. Resultado posible: el negocio entra y ve listas vacias aunque `app_state`
-tenga clientes/citas. Se recomienda una bandera tipo `normalized_ready` por negocio o fallback
-por entidad.
+Estado (2026-06-01): se implemento FALLBACK POR ENTIDAD en `loadNormalizedState`. Cada
+entidad (servicios, empleados, clientes, citas) usa la tabla normalizada si tiene filas;
+si esta vacia, cae a `app_state` solo para esa entidad. Asi ya no se ven listas vacias por
+una migracion parcial entre entidades.
+
+Riesgo restante: el fallback solo dispara si la tabla esta TOTALMENTE vacia. Si una tabla
+quedo PARCIALMENTE poblada (algunas citas migradas y otras solo en `app_state`), se muestra
+lo normalizado. Mitigacion: `mirror` corre en cada guardado (completa la tabla al primer
+save) o correr el RPC `migrate_app_state_to_normalized(business_id)` para backfill. Una
+bandera `normalized_ready` por negocio sigue siendo deseable a futuro.
 
 ### 7. Corte de caja calcula mal efectivo restante
 
@@ -898,7 +948,8 @@ SQL recomendado:
 
 - Forma rapida (recomendada): ejecutar `supabase/setup_full.sql`. Es idempotente
   y aplica TODO en el orden correcto (schema, wave3, normalized, onboarding,
-  accounts_direct, remove_invitations, catalog/cash/suppliers y remove_mercado_pago).
+  accounts_direct, remove_invitations, catalog/cash/suppliers, normalize A-E y
+  remove_mercado_pago).
   Sirve tanto en instancia nueva como existente.
 - Pasos manuales que `setup_full.sql` NO incluye:
   1. `supabase/create_admin_profile.sql` adaptando el UUID del usuario Auth.
@@ -914,9 +965,18 @@ Forma granular (equivalente, por archivos, en este orden):
 4. `supabase/onboarding.sql`  (OBLIGATORIO: el front hace `select onboarding_completed`)
 5. `supabase/accounts_direct.sql`  (despues de normalized_schema)
 6. `supabase/remove_invitations.sql`
-7. `supabase/catalog_products.sql`, `cash_cuts.sql`, `suppliers.sql` (capa futura, opcionales)
-8. `supabase/remove_mercado_pago.sql` (solo si hubo tablas legacy de Mercado Pago)
-9. `supabase/create_admin_profile.sql` (UUID manual)
+7. `supabase/catalog_products.sql`, `cash_cuts.sql`, `suppliers.sql` (tablas base
+   para catalogo, corte de caja y proveedores)
+8. `supabase/normalize_clients_appointments.sql` (mini-lote #2/#6: garantiza `deleted_at`
+   en clientes/citas + indices parciales; correr despues de normalized_schema.sql)
+9. `supabase/normalize_catalog.sql` (lote C #2/#6: RPC backfill de productos/categorias;
+   correr DESPUES de catalog_products.sql)
+10. `supabase/normalize_suppliers.sql` (lote D #2/#6: deleted_at + RPC backfill de
+    proveedores; correr DESPUES de suppliers.sql)
+11. `supabase/normalize_cash_cuts.sql` (lote E #2/#6: columnas por metodo/retiro +
+    deleted_at + RPC backfill de cortes; correr DESPUES de cash_cuts.sql)
+12. `supabase/remove_mercado_pago.sql` (solo si hubo tablas legacy de Mercado Pago)
+13. `supabase/create_admin_profile.sql` (UUID manual)
 
 Nota final:
 

@@ -16,7 +16,11 @@
 --   7. catalog_products.sql ..... capa futura (productos y servicios)
 --   8. cash_cuts.sql ............ capa futura (corte de caja)
 --   9. suppliers.sql ............ capa futura (proveedores)
---  10. remove_mercado_pago.sql .. limpieza de artefactos legacy
+--  10. normalize_clients_appointments.sql .. clientes/citas normalizados
+--  11. normalize_catalog.sql ..... backfill productos/categorias
+--  12. normalize_suppliers.sql ... proveedores normalizados + backfill
+--  13. normalize_cash_cuts.sql ... corte de caja normalizado + backfill
+--  14. remove_mercado_pago.sql .. limpieza de artefactos legacy
 --
 -- NO INCLUIDO (pasos manuales aparte):
 --   • create_admin_profile.sql  → requiere pegar el UUID del usuario Auth.
@@ -29,7 +33,7 @@
 
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 1/10 · schema.sql                                                      ║
+-- ║ 1/14 · schema.sql                                                      ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- Jack production schema
 -- Run this file in Supabase SQL Editor before using the app.
@@ -162,7 +166,7 @@ with check (
 );
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 2/10 · wave3_invitations_public_site.sql                               ║
+-- ║ 2/14 · wave3_invitations_public_site.sql                               ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- ════════════════════════════════════════════════════════════════════════════
 -- Jack — Wave 3
@@ -442,7 +446,7 @@ drop policy if exists "businesses_public_site_read" on businesses;
 -- ════════════════════════════════════════════════════════════════════════════
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 3/10 · normalized_schema.sql                                           ║
+-- ║ 3/14 · normalized_schema.sql                                           ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- Jack — Normalized data layer
 -- Run after schema.sql and wave3_invitations_public_site.sql.
@@ -713,8 +717,20 @@ begin
   select
     appointment->>'id',
     p_business_id,
-    appointment->>'clientId',
-    appointment->>'employeeId',
+    case
+      when exists (
+        select 1 from business_clients c
+        where c.id = appointment->>'clientId' and c.business_id = p_business_id
+      ) then appointment->>'clientId'
+      else null
+    end,
+    case
+      when exists (
+        select 1 from business_employees e
+        where e.id = appointment->>'employeeId' and e.business_id = p_business_id
+      ) then appointment->>'employeeId'
+      else null
+    end,
     appointment->>'service',
     (appointment->>'date')::date,
     (appointment->>'time')::time,
@@ -749,7 +765,7 @@ $$;
 grant execute on function migrate_app_state_to_normalized(uuid) to authenticated;
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 4/10 · onboarding.sql  (OBLIGATORIO)                                   ║
+-- ║ 4/14 · onboarding.sql  (OBLIGATORIO)                                   ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- ════════════════════════════════════════════════════════════════════════════
 -- Jack — Fase B: Onboarding inicial del negocio (P2)
@@ -781,7 +797,7 @@ alter table businesses
 -- service_role desde la Edge Function.
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 5/10 · accounts_direct.sql                                             ║
+-- ║ 5/14 · accounts_direct.sql                                             ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- ════════════════════════════════════════════════════════════════════════════
 -- Jack — Prioridad 7 (+ cierre del hueco de Prioridad 1): creación directa de
@@ -808,7 +824,7 @@ create index if not exists business_employees_profile_idx
 -- ════════════════════════════════════════════════════════════════════════════
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 6/10 · remove_invitations.sql                                          ║
+-- ║ 6/14 · remove_invitations.sql                                          ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- ════════════════════════════════════════════════════════════════════════════
 -- Jack — Prioridad 1: Eliminar por completo el sistema de invitaciones por código
@@ -833,7 +849,7 @@ drop table if exists invitation_codes cascade;
 -- ni redeem_invitation_code en la base de datos.
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 7/10 · catalog_products.sql  (capa futura)                             ║
+-- ║ 7/14 · catalog_products.sql  (capa futura)                             ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- ════════════════════════════════════════════════════════════════════════════
 -- Jack — Fase C: Productos y Servicios + categorías (P4)
@@ -915,7 +931,7 @@ with check (exists (
 ));
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 8/10 · cash_cuts.sql  (capa futura)                                    ║
+-- ║ 8/14 · cash_cuts.sql  (capa futura)                                    ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- ════════════════════════════════════════════════════════════════════════════
 -- Jack — Fase D: Corte de caja (P5)
@@ -945,8 +961,10 @@ create table if not exists business_cash_cuts (
   updated_at timestamptz not null default now()
 );
 
--- Un corte por día por negocio (cerrar de nuevo el mismo día actualiza la foto).
-create unique index if not exists business_cash_cuts_business_date_idx
+-- Índice de consulta por día. La unicidad de "un corte activo por día" se aplica en
+-- normalize_cash_cuts.sql con un índice parcial (deleted_at is null), para no romper
+-- instalaciones existentes con duplicados históricos.
+create index if not exists business_cash_cuts_business_date_lookup_idx
   on business_cash_cuts(business_id, cut_date);
 
 create index if not exists business_cash_cuts_business_idx
@@ -970,7 +988,7 @@ with check (exists (
 ));
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 9/10 · suppliers.sql  (capa futura)                                    ║
+-- ║ 9/14 · suppliers.sql  (capa futura)                                    ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- ════════════════════════════════════════════════════════════════════════════
 -- Jack — Fase E: Proveedores (P10)
@@ -1018,7 +1036,289 @@ with check (exists (
 ));
 
 -- ╔══════════════════════════════════════════════════════════════════════╗
--- ║ 10/10 · remove_mercado_pago.sql  (limpieza)                            ║
+-- ║ 10/14 · normalize_clients_appointments.sql                            ║
+-- ╚══════════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════════
+-- Jack — Mini-lote de normalización: CLIENTES + CITAS como fuente principal (#2/#6)
+-- ════════════════════════════════════════════════════════════════════════════
+-- Idempotente y NO destructivo. Ejecutar DESPUÉS de normalized_schema.sql.
+-- No borra datos, no hace DROP de tablas. Solo:
+--   1) Garantiza la columna `deleted_at` en business_clients y business_appointments
+--      (el frontend ya filtra `deleted_at is null`; esto asegura que exista en BDs
+--      viejas).
+--   2) Agrega índices parciales para acelerar la carga normalizada (filtro por
+--      negocio + no borrados).
+--
+-- Esto NO migra empleados, servicios, catálogo, proveedores ni corte de caja.
+-- Esos siguen viviendo en app_state por ahora.
+-- ════════════════════════════════════════════════════════════════════════════
+
+alter table business_clients      add column if not exists deleted_at timestamptz;
+alter table business_appointments add column if not exists deleted_at timestamptz;
+
+create index if not exists business_clients_live_idx
+  on business_clients (business_id, created_at desc)
+  where deleted_at is null;
+
+create index if not exists business_appointments_live_idx
+  on business_appointments (business_id, date, time)
+  where deleted_at is null;
+
+-- ╔══════════════════════════════════════════════════════════════════════╗
+-- ║ 11/14 · normalize_catalog.sql                                       ║
+-- ╚══════════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════════
+-- Jack — Normalización lote C: PRODUCTOS + CATEGORÍAS de catálogo (#2/#6)
+-- ════════════════════════════════════════════════════════════════════════════
+-- Idempotente y NO destructivo. PRERREQUISITO: haber corrido `catalog_products.sql`
+-- (crea business_product_categories y business_products + RLS). Este archivo solo
+-- agrega un RPC de BACKFILL para llevar el catálogo que hoy vive en
+-- businesses.app_state.config (categories / products) a las tablas normalizadas.
+--
+-- NO migra proveedores ni corte de caja (lotes D/E). No borra datos, sin DROP.
+-- ════════════════════════════════════════════════════════════════════════════
+
+create or replace function migrate_catalog_to_normalized(p_business_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_state jsonb;
+begin
+  select app_state into v_state from businesses where id = p_business_id;
+  if v_state is null then
+    return jsonb_build_object('error', 'Negocio no encontrado');
+  end if;
+
+  insert into business_product_categories (id, business_id, name)
+  select
+    category->>'id',
+    p_business_id,
+    category->>'name'
+  from jsonb_array_elements(coalesce(v_state->'config'->'categories', '[]'::jsonb)) category
+  where coalesce(category->>'id', '') <> ''
+  on conflict (id) do update set
+    name = excluded.name,
+    updated_at = now();
+
+  insert into business_products (id, business_id, category_id, name, cost, cost_type, sale_price)
+  select
+    product->>'id',
+    p_business_id,
+    nullif(product->>'categoryId', ''),
+    product->>'name',
+    coalesce((product->>'cost')::numeric, 0),
+    case when product->>'costType' = 'gross' then 'gross' else 'net' end,
+    coalesce((product->>'salePrice')::numeric, 0)
+  from jsonb_array_elements(coalesce(v_state->'config'->'products', '[]'::jsonb)) product
+  where coalesce(product->>'id', '') <> ''
+  on conflict (id) do update set
+    category_id = excluded.category_id,
+    name = excluded.name,
+    cost = excluded.cost,
+    cost_type = excluded.cost_type,
+    sale_price = excluded.sale_price,
+    updated_at = now();
+
+  return jsonb_build_object('success', true);
+end;
+$$;
+
+grant execute on function migrate_catalog_to_normalized(uuid) to authenticated;
+
+-- ╔══════════════════════════════════════════════════════════════════════╗
+-- ║ 12/14 · normalize_suppliers.sql                                     ║
+-- ╚══════════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════════
+-- Jack — Normalización lote D: PROVEEDORES (#2/#6)
+-- ════════════════════════════════════════════════════════════════════════════
+-- Idempotente y NO destructivo. PRERREQUISITO: haber corrido `suppliers.sql`
+-- (crea business_suppliers + RLS por negocio). Este archivo:
+--   1) Agrega `deleted_at` a business_suppliers (soft-delete) + índice parcial.
+--   2) Agrega RPC de BACKFILL para llevar los proveedores que hoy viven en
+--      businesses.app_state.suppliers (NIVEL RAÍZ, fuera de config para no
+--      exponerlos al sitio público) a la tabla normalizada.
+--
+-- Los proveedores siguen a nivel raíz en AppState y la tabla tiene RLS por negocio:
+-- nunca se exponen vía get_public_business. NO migra corte de caja (lote E).
+-- ════════════════════════════════════════════════════════════════════════════
+
+alter table business_suppliers add column if not exists deleted_at timestamptz;
+
+create index if not exists business_suppliers_live_idx
+  on business_suppliers (business_id, created_at desc)
+  where deleted_at is null;
+
+create or replace function migrate_suppliers_to_normalized(p_business_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_state jsonb;
+begin
+  select app_state into v_state from businesses where id = p_business_id;
+  if v_state is null then
+    return jsonb_build_object('error', 'Negocio no encontrado');
+  end if;
+
+  insert into business_suppliers (id, business_id, name, contact_name, phone, email, category, notes)
+  select
+    supplier->>'id',
+    p_business_id,
+    supplier->>'name',
+    nullif(supplier->>'contactName', ''),
+    nullif(supplier->>'phone', ''),
+    nullif(supplier->>'email', ''),
+    nullif(supplier->>'category', ''),
+    nullif(supplier->>'notes', '')
+  from jsonb_array_elements(coalesce(v_state->'suppliers', '[]'::jsonb)) supplier
+  where coalesce(supplier->>'id', '') <> ''
+  on conflict (id) do update set
+    name = excluded.name,
+    contact_name = excluded.contact_name,
+    phone = excluded.phone,
+    email = excluded.email,
+    category = excluded.category,
+    notes = excluded.notes,
+    updated_at = now();
+
+  return jsonb_build_object('success', true);
+end;
+$$;
+
+grant execute on function migrate_suppliers_to_normalized(uuid) to authenticated;
+
+-- ╔══════════════════════════════════════════════════════════════════════╗
+-- ║ 13/14 · normalize_cash_cuts.sql                                     ║
+-- ╚══════════════════════════════════════════════════════════════════════╝
+-- ════════════════════════════════════════════════════════════════════════════
+-- Jack — Normalización lote E: CORTE DE CAJA (#2/#6)
+-- ════════════════════════════════════════════════════════════════════════════
+-- Idempotente y NO destructivo. PRERREQUISITO: haber corrido `cash_cuts.sql`
+-- (crea business_cash_cuts + RLS por negocio). Este archivo:
+--   1) Extiende business_cash_cuts con las columnas por método de pago / retiro
+--      (P7) que la tabla original no guardaba, + `deleted_at` (soft-delete).
+--   2) Agrega RPC de BACKFILL desde businesses.app_state.cashCuts (NIVEL RAÍZ,
+--      fuera de config para no exponer datos financieros al sitio público).
+--
+-- Los cortes siguen a nivel raíz en AppState y la tabla tiene RLS por negocio:
+-- nunca se exponen vía get_public_business. Cierra la migración #2/#6.
+-- ════════════════════════════════════════════════════════════════════════════
+
+alter table business_cash_cuts add column if not exists cash_amount    numeric;
+alter table business_cash_cuts add column if not exists card_credit    numeric;
+alter table business_cash_cuts add column if not exists card_debit     numeric;
+alter table business_cash_cuts add column if not exists transfer       numeric;
+alter table business_cash_cuts add column if not exists total_received numeric;
+alter table business_cash_cuts add column if not exists expected_total numeric;
+alter table business_cash_cuts add column if not exists difference     numeric;
+alter table business_cash_cuts add column if not exists withdrawal     numeric;
+alter table business_cash_cuts add column if not exists cash_remaining numeric;
+alter table business_cash_cuts add column if not exists deleted_at     timestamptz;
+
+create index if not exists business_cash_cuts_live_idx
+  on business_cash_cuts (business_id, cut_date desc)
+  where deleted_at is null;
+
+-- Si ya existen duplicados activos por negocio/día, conservamos vivo el más reciente
+-- y marcamos los anteriores como deleted_at. Esto permite crear el índice único
+-- parcial sin destruir filas históricas.
+with ranked as (
+  select
+    id,
+    row_number() over (
+      partition by business_id, cut_date
+      order by updated_at desc nulls last, created_at desc nulls last, id desc
+    ) as rn
+  from business_cash_cuts
+  where deleted_at is null
+)
+update business_cash_cuts cut
+set deleted_at = now(), updated_at = now()
+from ranked
+where cut.id = ranked.id and ranked.rn > 1;
+
+drop index if exists business_cash_cuts_business_date_idx;
+create unique index if not exists business_cash_cuts_business_date_live_idx
+  on business_cash_cuts (business_id, cut_date)
+  where deleted_at is null;
+
+create or replace function migrate_cash_cuts_to_normalized(p_business_id uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_state jsonb;
+begin
+  select app_state into v_state from businesses where id = p_business_id;
+  if v_state is null then
+    return jsonb_build_object('error', 'Negocio no encontrado');
+  end if;
+
+  insert into business_cash_cuts (
+    id, business_id, cut_date, closed_at, closed_by, opening_float, total,
+    paid_count, pending_balance, movements, notes,
+    cash_amount, card_credit, card_debit, transfer, total_received,
+    expected_total, difference, withdrawal, cash_remaining
+  )
+  select
+    cut->>'id',
+    p_business_id,
+    (cut->>'date')::date,
+    coalesce((cut->>'closedAt')::timestamptz, now()),
+    nullif(cut->>'closedBy', ''),
+    coalesce((cut->>'openingFloat')::numeric, 0),
+    coalesce((cut->>'total')::numeric, 0),
+    coalesce((cut->>'paidCount')::int, 0),
+    coalesce((cut->>'pendingBalance')::numeric, 0),
+    coalesce((cut->>'movements')::int, 0),
+    nullif(cut->>'notes', ''),
+    (cut->>'cashAmount')::numeric,
+    (cut->>'cardCredit')::numeric,
+    (cut->>'cardDebit')::numeric,
+    (cut->>'transfer')::numeric,
+    (cut->>'totalReceived')::numeric,
+    (cut->>'expectedTotal')::numeric,
+    (cut->>'difference')::numeric,
+    (cut->>'withdrawal')::numeric,
+    (cut->>'cashRemaining')::numeric
+  from jsonb_array_elements(coalesce(v_state->'cashCuts', '[]'::jsonb)) cut
+  where coalesce(cut->>'id', '') <> ''
+  on conflict (id) do update set
+    cut_date = excluded.cut_date,
+    closed_at = excluded.closed_at,
+    closed_by = excluded.closed_by,
+    opening_float = excluded.opening_float,
+    total = excluded.total,
+    paid_count = excluded.paid_count,
+    pending_balance = excluded.pending_balance,
+    movements = excluded.movements,
+    notes = excluded.notes,
+    cash_amount = excluded.cash_amount,
+    card_credit = excluded.card_credit,
+    card_debit = excluded.card_debit,
+    transfer = excluded.transfer,
+    total_received = excluded.total_received,
+    expected_total = excluded.expected_total,
+    difference = excluded.difference,
+    withdrawal = excluded.withdrawal,
+    cash_remaining = excluded.cash_remaining,
+    updated_at = now();
+
+  return jsonb_build_object('success', true);
+end;
+$$;
+
+grant execute on function migrate_cash_cuts_to_normalized(uuid) to authenticated;
+
+-- ╔══════════════════════════════════════════════════════════════════════╗
+-- ║ 14/14 · remove_mercado_pago.sql  (limpieza)                         ║
 -- ╚══════════════════════════════════════════════════════════════════════╝
 -- Jack — Remove old Mercado Pago artifacts
 -- Run once if the project had the previous Mercado Pago/payment-table setup.

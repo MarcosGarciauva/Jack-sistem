@@ -1,4 +1,4 @@
-import type { AppState, AuthProfile, EmployeeStatus } from "../types";
+import type { AppState, AuthProfile, EmployeeStatus, PaymentStatus } from "../types";
 import { supabase } from "./supabaseClient";
 
 // ─── Tipos de apoyo ───────────────────────────────────────────────────────────
@@ -98,7 +98,12 @@ const normalizedAvailable = (error: unknown) => {
     !message.includes("does not exist");
 };
 
-async function loadNormalizedState(businessId: string, fallbackConfig: AppState["config"]): Promise<AppState | null> {
+// Carga la capa normalizada con FALLBACK POR ENTIDAD (#2/#6, mini-lote: clientes +
+// citas como fuente principal). Si una tabla normalizada está vacía o aún no
+// existe, esa entidad cae a `app_state` para no mostrar listas vacías por una
+// migración parcial. Las citas y los clientes filtran `deleted_at is null`, así un
+// registro borrado no reaparece.
+async function loadNormalizedState(businessId: string, fallback: AppState): Promise<AppState | null> {
   if (!supabase) return null;
   const [servicesRes, employeesRes, clientsRes, appointmentsRes] = await Promise.all([
     supabase.from("business_services").select("*").eq("business_id", businessId).eq("active", true).order("created_at"),
@@ -113,17 +118,19 @@ async function loadNormalizedState(businessId: string, fallbackConfig: AppState[
     throw firstError;
   }
 
+  const servicesRows = servicesRes.data ?? [];
+  const employeesRows = employeesRes.data ?? [];
+  const clientsRows = clientsRes.data ?? [];
+  const appointmentsRows = appointmentsRes.data ?? [];
+
   const hasData =
-    (servicesRes.data?.length ?? 0) +
-    (employeesRes.data?.length ?? 0) +
-    (clientsRes.data?.length ?? 0) +
-    (appointmentsRes.data?.length ?? 0) > 0;
+    servicesRows.length + employeesRows.length + clientsRows.length + appointmentsRows.length > 0;
   if (!hasData) return null;
 
-  return {
-    config: {
-      ...fallbackConfig,
-      services: (servicesRes.data ?? []).map((service) => ({
+  // Servicios/empleados todavía NO se migran en este lote: si la tabla normalizada
+  // trae datos los usamos, pero si está vacía caemos a app_state (sin romper).
+  const services = servicesRows.length
+    ? servicesRows.map((service) => ({
         id: service.id,
         name: service.name,
         basePrice: Number(service.base_price ?? 0),
@@ -131,65 +138,186 @@ async function loadNormalizedState(businessId: string, fallbackConfig: AppState[
         depositRequired: Boolean(service.deposit_required),
         depositAmount: Number(service.deposit_amount ?? 0)
       }))
-    },
-    employees: (employeesRes.data ?? []).map((employee) => ({
-      id: employee.id,
-      name: employee.name,
-      position: employee.position,
-      status: employee.status
-    })),
-    clients: (clientsRes.data ?? []).map((client) => ({
-      id: client.id,
-      name: client.name,
-      phone: client.phone ?? "",
-      email: client.email ?? undefined,
-      requestedService: "",
-      amount: 0,
-      appointmentDate: "",
-      appointmentTime: "",
-      status: "pending",
-      assignedEmployeeId: "",
-      notes: client.notes ?? undefined
-    })),
-    appointments: (appointmentsRes.data ?? []).map((appointment) => ({
-      id: appointment.id,
-      clientId: appointment.client_id ?? "",
-      service: appointment.service_name,
-      date: appointment.date,
-      time: String(appointment.time).slice(0, 5),
-      duration: Number(appointment.duration_minutes ?? 60),
-      price: Number(appointment.price ?? 0),
-      employeeId: appointment.employee_id ?? "",
-      status: appointment.status,
-      paymentStatus: appointment.payment_status === "paid" ? "paid" : "none",
-      depositAmount: 0,
-      paidAmount: Number(appointment.paid_amount ?? 0),
-      source: appointment.source ?? "dashboard",
-      createdAt: appointment.created_at,
-      notes: appointment.notes ?? undefined
-    }))
+    : fallback.config.services;
+
+  const employees = employeesRows.length
+    ? employeesRows.map((employee) => ({
+        id: employee.id,
+        name: employee.name,
+        position: employee.position,
+        status: employee.status
+      }))
+    : fallback.employees;
+
+  // CLIENTES: fuente principal normalizada; fallback por entidad a app_state.
+  const clients = clientsRows.length
+    ? clientsRows.map((client) => ({
+        id: client.id,
+        name: client.name,
+        phone: client.phone ?? "",
+        email: client.email ?? undefined,
+        requestedService: "",
+        amount: 0,
+        appointmentDate: "",
+        appointmentTime: "",
+        status: "pending" as const,
+        assignedEmployeeId: "",
+        notes: client.notes ?? undefined
+      }))
+    : fallback.clients;
+
+  // CITAS: fuente principal normalizada; fallback por entidad a app_state.
+  const appointments = appointmentsRows.length
+    ? appointmentsRows.map((appointment) => ({
+        id: appointment.id,
+        clientId: appointment.client_id ?? "",
+        service: appointment.service_name,
+        date: appointment.date,
+        time: String(appointment.time).slice(0, 5),
+        duration: Number(appointment.duration_minutes ?? 60),
+        price: Number(appointment.price ?? 0),
+        employeeId: appointment.employee_id ?? "",
+        status: appointment.status,
+        paymentStatus: (appointment.payment_status === "paid" ? "paid" : "none") as PaymentStatus,
+        depositAmount: 0,
+        paidAmount: Number(appointment.paid_amount ?? 0),
+        source: appointment.source ?? "dashboard",
+        createdAt: appointment.created_at,
+        notes: appointment.notes ?? undefined
+      }))
+    : fallback.appointments;
+
+  // CATÁLOGO (#C): categorías + productos. Fetch SEPARADO y tolerante: si las tablas
+  // de catálogo no existen todavía (BD sin catalog_products.sql) NO se rompe la carga
+  // de citas/clientes; cae a app_state solo para catálogo. Fallback POR ENTIDAD.
+  let categories = fallback.config.categories ?? [];
+  let products = fallback.config.products ?? [];
+  try {
+    const [catRes, prodRes] = await Promise.all([
+      supabase.from("business_product_categories").select("*").eq("business_id", businessId).order("created_at"),
+      supabase.from("business_products").select("*").eq("business_id", businessId).eq("active", true).order("created_at")
+    ]);
+    const catalogErr = catRes.error ?? prodRes.error;
+    if (catalogErr) {
+      if (normalizedAvailable(catalogErr)) throw catalogErr; // error real → propaga
+      // tabla ausente → conserva fallback de app_state
+    } else {
+      if ((catRes.data?.length ?? 0) > 0) {
+        categories = (catRes.data ?? []).map((category) => ({ id: category.id, name: category.name }));
+      }
+      if ((prodRes.data?.length ?? 0) > 0) {
+        products = (prodRes.data ?? []).map((product) => ({
+          id: product.id,
+          name: product.name,
+          categoryId: product.category_id ?? undefined,
+          cost: Number(product.cost ?? 0),
+          costType: product.cost_type === "gross" ? "gross" : "net",
+          salePrice: Number(product.sale_price ?? 0)
+        }));
+      }
+    }
+  } catch (catalogErr) {
+    if (normalizedAvailable(catalogErr)) throw catalogErr;
+  }
+
+  // PROVEEDORES (#D): viven a nivel RAÍZ de AppState (fuera de config) para no
+  // exponerse al sitio público. Fetch separado y tolerante; filtra `deleted_at is
+  // null`; fallback por entidad a app_state.suppliers.
+  let suppliers = fallback.suppliers ?? [];
+  try {
+    const supRes = await supabase
+      .from("business_suppliers")
+      .select("*")
+      .eq("business_id", businessId)
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false });
+    if (supRes.error) {
+      if (normalizedAvailable(supRes.error)) throw supRes.error;
+    } else if ((supRes.data?.length ?? 0) > 0) {
+      suppliers = (supRes.data ?? []).map((supplier) => ({
+        id: supplier.id,
+        name: supplier.name,
+        contactName: supplier.contact_name ?? undefined,
+        phone: supplier.phone ?? undefined,
+        email: supplier.email ?? undefined,
+        category: supplier.category ?? undefined,
+        notes: supplier.notes ?? undefined
+      }));
+    }
+  } catch (supErr) {
+    if (normalizedAvailable(supErr)) throw supErr;
+  }
+
+  // CORTE DE CAJA (#E): vive a nivel RAÍZ de AppState (datos financieros, fuera de
+  // config → no se exponen al sitio público). Fetch separado y tolerante; filtra
+  // `deleted_at is null`; fallback por entidad a app_state.cashCuts. Se mapean TODOS
+  // los campos por método/retiro (la tabla se extendió en normalize_cash_cuts.sql).
+  const numOrUndef = (v: unknown) => (v === null || v === undefined ? undefined : Number(v));
+  let cashCuts = fallback.cashCuts ?? [];
+  try {
+    const cutsRes = await supabase
+      .from("business_cash_cuts")
+      .select("*")
+      .eq("business_id", businessId)
+      .is("deleted_at", null)
+      .order("cut_date", { ascending: false });
+    if (cutsRes.error) {
+      if (normalizedAvailable(cutsRes.error)) throw cutsRes.error;
+    } else if ((cutsRes.data?.length ?? 0) > 0) {
+      cashCuts = (cutsRes.data ?? []).map((cut) => ({
+        id: cut.id,
+        date: cut.cut_date,
+        closedAt: cut.closed_at,
+        closedBy: cut.closed_by ?? "",
+        openingFloat: Number(cut.opening_float ?? 0),
+        total: Number(cut.total ?? 0),
+        paidCount: Number(cut.paid_count ?? 0),
+        pendingBalance: Number(cut.pending_balance ?? 0),
+        movements: Number(cut.movements ?? 0),
+        notes: cut.notes ?? undefined,
+        cashAmount: numOrUndef(cut.cash_amount),
+        cardCredit: numOrUndef(cut.card_credit),
+        cardDebit: numOrUndef(cut.card_debit),
+        transfer: numOrUndef(cut.transfer),
+        totalReceived: numOrUndef(cut.total_received),
+        expectedTotal: numOrUndef(cut.expected_total),
+        difference: numOrUndef(cut.difference),
+        withdrawal: numOrUndef(cut.withdrawal),
+        cashRemaining: numOrUndef(cut.cash_remaining)
+      }));
+    }
+  } catch (cutsErr) {
+    if (normalizedAvailable(cutsErr)) throw cutsErr;
+  }
+
+  return {
+    config: { ...fallback.config, services, products, categories },
+    employees,
+    clients,
+    appointments,
+    suppliers,
+    cashCuts
   };
 }
 
 async function mirrorNormalizedState(businessId: string, state: AppState): Promise<void> {
   if (!supabase) return;
+  // SERVICIOS (#B): se espeja con valores reales de depósito. NO se incluye `active`
+  // en el payload: al insertar usa el default (true) y al actualizar NO lo toca, así
+  // un servicio desactivado (borrado) no resucita aunque una sesión vieja lo re-espeje
+  // (mismo patrón anti-resurrección que `deleted_at` en citas/clientes).
   const services = state.config.services.map((service) => ({
     id: service.id,
     business_id: businessId,
     name: service.name,
     base_price: service.basePrice,
     duration_minutes: service.duration,
-    deposit_required: false,
-    deposit_amount: 0,
-    active: true
+    deposit_required: Boolean(service.depositRequired),
+    deposit_amount: Number(service.depositAmount ?? 0)
   }));
-  const employees = state.employees.map((employee) => ({
-    id: employee.id,
-    business_id: businessId,
-    name: employee.name,
-    position: employee.position,
-    status: employee.status
-  }));
+  // EMPLEADOS (#B): NO se espejan aquí. La fuente de verdad es el Edge Function
+  // `admin-manage-user` (crea/edita/borra la fila en business_employees). Espejarlos
+  // desde un guardado de admin con sesión vieja podría RESUCITAR un empleado borrado.
   const clients = state.clients.map((client) => ({
     id: client.id,
     business_id: businessId,
@@ -218,12 +346,89 @@ async function mirrorNormalizedState(businessId: string, state: AppState): Promi
 
   const results = await Promise.all([
     services.length ? supabase.from("business_services").upsert(services) : Promise.resolve({ error: null }),
-    employees.length ? supabase.from("business_employees").upsert(employees) : Promise.resolve({ error: null }),
     clients.length ? supabase.from("business_clients").upsert(clients) : Promise.resolve({ error: null }),
     appointments.length ? supabase.from("business_appointments").upsert(appointments) : Promise.resolve({ error: null })
   ]);
   const firstError = results.find((result) => result.error)?.error;
   if (firstError && normalizedAvailable(firstError)) throw firstError;
+
+  // CATÁLOGO (#C): categorías + productos. Secuencial (categorías primero por la FK
+  // category_id) y tolerante a tablas ausentes. Productos NO mandan `active`: al
+  // insertar usa default true, al actualizar no lo toca, así un producto borrado
+  // (active=false) no resucita aunque una sesión vieja lo re-espeje.
+  const categories = (state.config.categories ?? []).map((category) => ({
+    id: category.id,
+    business_id: businessId,
+    name: category.name
+  }));
+  const products = (state.config.products ?? []).map((product) => ({
+    id: product.id,
+    business_id: businessId,
+    category_id: product.categoryId || null,
+    name: product.name,
+    cost: product.cost,
+    cost_type: product.costType,
+    sale_price: product.salePrice
+  }));
+  try {
+    if (categories.length) {
+      const r = await supabase.from("business_product_categories").upsert(categories);
+      if (r.error && normalizedAvailable(r.error)) throw r.error;
+    }
+    if (products.length) {
+      const r = await supabase.from("business_products").upsert(products);
+      if (r.error && normalizedAvailable(r.error)) throw r.error;
+    }
+  } catch (catalogErr) {
+    if (normalizedAvailable(catalogErr)) throw catalogErr;
+  }
+
+  // PROVEEDORES (#D): upsert tolerante a tabla ausente. NO se manda `deleted_at`, así
+  // un proveedor borrado (soft-delete) no resucita aunque una sesión vieja lo re-espeje.
+  const suppliers = (state.suppliers ?? []).map((supplier) => ({
+    id: supplier.id,
+    business_id: businessId,
+    name: supplier.name,
+    contact_name: supplier.contactName ?? null,
+    phone: supplier.phone ?? null,
+    email: supplier.email ?? null,
+    category: supplier.category ?? null,
+    notes: supplier.notes ?? null
+  }));
+  if (suppliers.length) {
+    const r = await supabase.from("business_suppliers").upsert(suppliers);
+    if (r.error && normalizedAvailable(r.error)) throw r.error;
+  }
+
+  // CORTE DE CAJA (#E): upsert por id (un corte por fecha; el id es estable por
+  // fecha). Se guardan los campos por método/retiro. NO se manda `deleted_at` → un
+  // corte borrado no resucita aunque una sesión vieja lo re-espeje.
+  const cashCuts = (state.cashCuts ?? []).map((cut) => ({
+    id: cut.id,
+    business_id: businessId,
+    cut_date: cut.date,
+    closed_at: cut.closedAt,
+    closed_by: cut.closedBy ?? null,
+    opening_float: cut.openingFloat ?? 0,
+    total: cut.total,
+    paid_count: cut.paidCount,
+    pending_balance: cut.pendingBalance,
+    movements: cut.movements,
+    notes: cut.notes ?? null,
+    cash_amount: cut.cashAmount ?? null,
+    card_credit: cut.cardCredit ?? null,
+    card_debit: cut.cardDebit ?? null,
+    transfer: cut.transfer ?? null,
+    total_received: cut.totalReceived ?? null,
+    expected_total: cut.expectedTotal ?? null,
+    difference: cut.difference ?? null,
+    withdrawal: cut.withdrawal ?? null,
+    cash_remaining: cut.cashRemaining ?? null
+  }));
+  if (cashCuts.length) {
+    const r = await supabase.from("business_cash_cuts").upsert(cashCuts);
+    if (r.error && normalizedAvailable(r.error)) throw r.error;
+  }
 }
 
 export const databaseService = {
@@ -263,13 +468,11 @@ export const databaseService = {
     if (!data || !data.active) return null;
     const fallback = normalizePaymentState(data.app_state as AppState);
     fallback.config.onboardingCompleted = Boolean(data.onboarding_completed);
-    const normalized = await loadNormalizedState(businessId, fallback.config);
+    const normalized = await loadNormalizedState(businessId, fallback);
     if (normalized) {
-      // Cortes de caja y proveedores viven en app_state (nivel raíz, fuera de
-      // config para no exponerlos al sitio público); la capa normalizada no los
-      // reconstruye, así que los preservamos desde el fallback.
-      normalized.cashCuts = fallback.cashCuts ?? [];
-      normalized.suppliers = fallback.suppliers ?? [];
+      // Proveedores (#D) y cortes de caja (#E) ya los resolvió loadNormalizedState
+      // (normalizado o fallback por entidad), ambos a nivel raíz fuera de config.
+      // No los sobrescribimos desde el fallback.
       return normalized;
     }
     return fallback;
@@ -285,6 +488,78 @@ export const databaseService = {
 
     if (error) throw error;
     await mirrorNormalizedState(businessId, state);
+  },
+
+  // ─── Borrado normalizado por entidad (#2/#5) ────────────────────────────────
+  // Soft-delete EXPLÍCITO por id: marca `deleted_at` solo en el registro que el
+  // usuario eliminó. NO inferimos borrados por ausencia (eso podría borrar una
+  // reserva pública recién entrada si la sesión del admin está desactualizada).
+  // `app_state` ya se actualiza por separado vía saveBusinessState (espejo/compat).
+  async softDeleteAppointment(businessId: string, appointmentId: string): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("business_appointments")
+      .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("business_id", businessId)
+      .eq("id", appointmentId);
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  async softDeleteClient(businessId: string, clientId: string): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("business_clients")
+      .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("business_id", businessId)
+      .eq("id", clientId);
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  // Servicios (#B): el loader filtra `active = true`. Borrar un servicio = marcarlo
+  // inactivo por id (no se borra la fila para preservar el histórico de citas que lo
+  // referencian). El espejo ya no fuerza `active`, así no se reactiva solo.
+  async deactivateService(businessId: string, serviceId: string): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("business_services")
+      .update({ active: false, updated_at: new Date().toISOString() })
+      .eq("business_id", businessId)
+      .eq("id", serviceId);
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  // Productos (#C): mismo patrón que servicios. Borrar = active=false por id.
+  async deactivateProduct(businessId: string, productId: string): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("business_products")
+      .update({ active: false, updated_at: new Date().toISOString() })
+      .eq("business_id", businessId)
+      .eq("id", productId);
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  // Proveedores (#D): borrar = soft-delete por id (deleted_at). El loader filtra
+  // deleted_at null; el espejo no manda deleted_at → no resucita.
+  async softDeleteSupplier(businessId: string, supplierId: string): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("business_suppliers")
+      .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("business_id", businessId)
+      .eq("id", supplierId);
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  // Corte de caja (#E): borrar = soft-delete por id. Mismo patrón anti-resurrección.
+  async softDeleteCashCut(businessId: string, cutId: string): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("business_cash_cuts")
+      .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq("business_id", businessId)
+      .eq("id", cutId);
+    if (error && normalizedAvailable(error)) throw error;
   },
 
   // ─── Cuentas: empleados (creados directamente por el administrador) ────────
