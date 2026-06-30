@@ -91,11 +91,23 @@ function normalizePaymentState(state: AppState): AppState {
 }
 
 const normalizedAvailable = (error: unknown) => {
-  const message = String((error as { message?: string })?.message ?? "");
-  return !message.includes("business_services") &&
-    !message.includes("business_employees") &&
-    !message.includes("business_clients") &&
-    !message.includes("business_appointments") &&
+  const err = error as { message?: string; code?: string; details?: string; hint?: string };
+  const message = [err.code, err.message, err.details, err.hint].filter(Boolean).join(" ").toLowerCase();
+  const optionalOrNormalizedTables = [
+    "business_services",
+    "business_employees",
+    "business_clients",
+    "business_appointments",
+    "business_product_categories",
+    "business_products",
+    "business_suppliers",
+    "business_cash_cuts",
+    "business_sales"
+  ];
+  return !optionalOrNormalizedTables.some((table) => message.includes(table)) &&
+    !message.includes("pgrst205") &&
+    !message.includes("schema cache") &&
+    !message.includes("could not find the table") &&
     !message.includes("relation") &&
     !message.includes("does not exist");
 };
