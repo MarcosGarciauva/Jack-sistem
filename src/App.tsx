@@ -285,7 +285,12 @@ function DashboardApp() {
       setBusinessState(loadedBusiness);
     } catch (error) {
       void monitoringService.captureError(error, "auth.loadAuthenticatedUser");
-      const message = error instanceof Error ? error.message : String(error);
+      const err = error as { message?: string; code?: string; details?: string; hint?: string; name?: string };
+      const message = error instanceof Error
+        ? error.message
+        : [err.name, err.code, err.message, err.details, err.hint]
+          .filter(Boolean)
+          .join(" · ") || JSON.stringify(error);
       setSetupMessage(`No se pudo cargar tu perfil. Detalle técnico: ${message}`);
     } finally {
       setLoading(false);
