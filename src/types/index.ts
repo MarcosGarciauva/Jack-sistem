@@ -38,6 +38,10 @@ export interface ProductItem {
   cost: number;
   costType: CostType;
   salePrice: number;
+  /** Existencias actuales (inventario). Opcional por compatibilidad con datos viejos. */
+  stock?: number;
+  /** Umbral para avisar "stock bajo". Si stock <= lowStock se resalta. */
+  lowStock?: number;
 }
 
 export interface BusinessConfig {
@@ -92,6 +96,9 @@ export interface Appointment {
   employeeId: string;
   status: AppointmentStatus;
   paymentStatus: PaymentStatus;
+  // Corte v2: con qué método pagó el cliente (se elige al marcar "Pagado").
+  // Opcional por compatibilidad con citas pagadas antes de esta versión.
+  paymentMethod?: SalePaymentMethod;
   depositAmount: number;
   paidAmount: number;
   source: BookingSource;
@@ -134,6 +141,15 @@ export interface CashCut {
   difference?: number;       // recibido − esperado (negativo = faltante)
   withdrawal?: number;       // monto retirado de caja al cierre
   cashRemaining?: number;    // efectivo restante en caja tras el retiro
+  // Corte v2 · foto del esperado por método al cierre (citas pagadas + ventas de
+  // productos del día). `expectedUnassigned` = cobros pagados sin método registrado.
+  expectedCash?: number;
+  expectedCardCredit?: number;
+  expectedCardDebit?: number;
+  expectedTransfer?: number;
+  expectedUnassigned?: number;
+  salesTotal?: number;       // total de ventas de productos del día
+  salesCount?: number;       // número de ventas de productos del día
 }
 
 export interface Supplier {
@@ -146,6 +162,27 @@ export interface Supplier {
   notes?: string;
 }
 
+export type SalePaymentMethod = "cash" | "card_credit" | "card_debit" | "transfer";
+
+export interface SaleItem {
+  productId: string;
+  productName: string;
+  qty: number;
+  unitPrice: number;
+}
+
+export interface Sale {
+  id: string;
+  date: string;
+  time: string;
+  items: SaleItem[];
+  total: number;
+  paymentMethod: SalePaymentMethod;
+  employeeId?: string;
+  notes?: string;
+  createdAt: string;
+}
+
 export interface AppState {
   config: BusinessConfig;
   clients: Client[];
@@ -153,6 +190,7 @@ export interface AppState {
   appointments: Appointment[];
   cashCuts?: CashCut[];
   suppliers?: Supplier[];
+  sales?: Sale[];
 }
 
 export interface AppointmentFilters {

@@ -1,18 +1,19 @@
 // ════════════════════════════════════════════════════════════════════════════
 // Jack — Reservaciones web (P2/P3/P4)
 // ════════════════════════════════════════════════════════════════════════════
-// Subsección (pestaña) dentro de Citas. Muestra SOLO las reservas que entran
-// desde el sitio público y siguen por confirmar (source === "public_site" &&
-// status === "pending"). Cada tarjeta es de SOLO LECTURA y abre la ventana
-// centrada de detalle (onOpen); desde ahí se confirma, cancela o avisa por
-// WhatsApp. No hay edición rápida ni botones de acción en la lista (P4).
+// Subsección (pestaña) dentro de Citas. Muestra SOLO solicitudes web pendientes
+// por aceptar (source === "public_site" && status === "pending"). Cada tarjeta
+// es de SOLO LECTURA y abre la ventana centrada de detalle (onOpen); desde ahí se
+// acepta como cita formal, cancela o contacta por WhatsApp.
 //
-// Al confirmar, la reserva pasa a status "confirmed", deja de aparecer aquí y se
-// integra al listado normal de Citas (P3). No se duplica en ambas vistas.
+// Producto: al aceptar, la solicitud web se convierte en cita formal pendiente
+// (source === "dashboard", status === "pending") y aparece en el listado normal
+// de Citas cuando se filtra por Pendiente.
 // ════════════════════════════════════════════════════════════════════════════
 
-import { Clock, ChevronRight } from "lucide-react";
+import { Clock, ChevronRight, Download } from "lucide-react";
 import { JEmpty } from "../../components/Editorial";
+import { downloadExcel } from "../../lib/excelExport";
 import { formatCurrency, formatDate } from "../../lib/format";
 import { formatPhoneDisplay } from "../../components/PhoneInput";
 import type { Appointment, Client } from "../../types";
@@ -30,23 +31,46 @@ export function WebReservationsView({
   currency: string;
   onOpen: (apt: Appointment) => void;
 }) {
+  const exportExcel = () => {
+    downloadExcel("reservaciones-web", "Reservaciones web", reservations.map((apt) => {
+      const client = clientById.get(apt.clientId);
+      const employee = employeeById.get(apt.employeeId);
+      return {
+        Cliente: client?.name ?? "Cliente",
+        Teléfono: client?.phone ? formatPhoneDisplay(client.phone) : "",
+        Correo: client?.email ?? "",
+        Servicio: apt.service,
+        Fecha: apt.date,
+        Hora: apt.time,
+        Duración: apt.duration,
+        Precio: apt.price,
+        Empleado: employee?.name ?? "Sin asignar",
+        Estado: "Por aceptar",
+        Notas: apt.notes ?? ""
+      };
+    }));
+  };
+
   return (
     <div className="space-y-5">
       <div className="j-stat-strip">
         <div className="j-stat">
-          <div className="j-stat-l">Por confirmar</div>
+          <div className="j-stat-l">Por aceptar</div>
           <div className="j-stat-v">{reservations.length}</div>
         </div>
       </div>
 
       <section className="j-card">
         <div className="j-card-head">
-          <h3>Reservas por confirmar</h3>
-          <span className="sub">— llegan desde tu sitio público</span>
+          <h3>Solicitudes web</h3>
+          <span className="sub">— pendientes por aceptar desde tu sitio público</span>
+          <button className="j-btn j-btn-sm" onClick={exportExcel} disabled={reservations.length === 0} style={{ marginLeft: "auto" }}>
+            <Download size={12} /> Exportar
+          </button>
         </div>
         {reservations.length === 0 ? (
           <div style={{ padding: 28 }}>
-            <JEmpty compact title="Todo al día" description="No tienes reservas web por confirmar." />
+            <JEmpty compact title="Todo al día" description="No tienes solicitudes web pendientes por aceptar." />
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 16 }}>
@@ -63,7 +87,7 @@ export function WebReservationsView({
                   <div style={{ flex: "1 1 240px", minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                       <span style={{ fontWeight: 600, fontSize: 14.5, color: "var(--fg)" }}>{client?.name ?? "Cliente"}</span>
-                      <span className="j-tag dot warn">Por confirmar</span>
+                      <span className="j-tag dot warn">Por aceptar</span>
                     </div>
                     <div className="mono" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
                       {client?.phone ? formatPhoneDisplay(client.phone) : "Sin teléfono"}

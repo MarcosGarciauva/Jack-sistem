@@ -1336,6 +1336,74 @@ update businesses
 set app_state = app_state #- '{config,paymentProvider}' #- '{config,mercadoPagoEnabled}'
 where app_state ? 'config';
 
+-- ╔══════════════════════════════════════════════════════════════════════╗
+-- ║ 15 · cash_cut_v2.sql  (corte de caja v2)                            ║
+-- ╚══════════════════════════════════════════════════════════════════════╝
+-- Método de pago por cita (se registra al marcar "Pagado") + foto del esperado
+-- por método en el corte. Citas viejas quedan con payment_method null.
+
+alter table if exists public.business_appointments
+  add column if not exists payment_method text
+  check (payment_method is null or payment_method in ('cash', 'card_credit', 'card_debit', 'transfer'));
+
+alter table if exists public.business_cash_cuts
+  add column if not exists expected_cash numeric,
+  add column if not exists expected_card_credit numeric,
+  add column if not exists expected_card_debit numeric,
+  add column if not exists expected_transfer numeric,
+  add column if not exists expected_unassigned numeric,
+  add column if not exists sales_total numeric,
+  add column if not exists sales_count integer;
+
+-- ╔══════════════════════════════════════════════════════════════════════╗
+-- ║ 16 · sales.sql  (ventas de productos por fila)                       ║
+-- ╚══════════════════════════════════════════════════════════════════════╝
+-- Tabla normalizada de ventas: los empleados pueden registrar ventas por fila
+-- (no pueden escribir el JSON completo de businesses). Ver supabase/sales.sql.
+
+create table if not exists business_sales (
+  id text primary key,
+  business_id uuid not null references businesses(id) on delete cascade,
+  sale_date date not null,
+  sale_time text not null default '',
+  items jsonb not null default '[]'::jsonb,
+  total numeric not null default 0,
+  payment_method text not null default 'cash'
+    check (payment_method in ('cash', 'card_credit', 'card_debit', 'transfer')),
+  employee_id text,
+  notes text,
+  created_at timestamptz not null default now(),
+  deleted_at timestamptz
+);
+
+create index if not exists business_sales_business_idx on business_sales(business_id);
+create index if not exists business_sales_date_idx on business_sales(business_id, sale_date);
+
+alter table business_sales enable row level security;
+
+drop policy if exists "business_sales_same_business" on business_sales;
+create policy "business_sales_same_business" on business_sales
+for all to authenticated
+using (exists (
+  select 1 from profiles p
+  where p.id = auth.uid() and p.active = true
+    and (p.role = 'super_admin' or p.business_id = business_sales.business_id)
+))
+with check (exists (
+  select 1 from profiles p
+  where p.id = auth.uid() and p.active = true
+    and (p.role = 'super_admin' or p.business_id = business_sales.business_id)
+));
+
+do $$
+begin
+  if to_regproc('public.jack_block_business_id_change') is not null then
+    execute 'drop trigger if exists jack_guard_business_sales on business_sales';
+    execute 'create trigger jack_guard_business_sales before update on business_sales
+             for each row execute function jack_block_business_id_change()';
+  end if;
+end $$;
+
 -- ════════════════════════════════════════════════════════════════════════════
 -- FIN setup_full.sql
 -- ════════════════════════════════════════════════════════════════════════════

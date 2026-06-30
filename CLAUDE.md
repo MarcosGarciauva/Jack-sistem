@@ -14,8 +14,7 @@ Estado actual del proyecto:
 - El sistema de invitaciones por codigo fue ELIMINADO. Las cuentas se crean
   directamente con la Edge Function `admin-manage-user` (super_admin crea
   negocios+administradores; admin crea empleados con correo+contrasena).
-- Onboarding obligatorio en el primer ingreso del administrador (P2), persistido
-  en `businesses.onboarding_completed`.
+- Onboarding obligatorio en el primer ingreso del administrador: datos del negocio, horarios, servicios/precios; empleados, proveedores y catálogo son omitibles. Solo marca `businesses.onboarding_completed` al finalizar.
 - Dashboard editorial blanco/negro premium.
 - Sitio publico de reservas en `/p/:slug` como paquete add-on.
 - Reservas publicas entran al dashboard como `source = "public_site"` y estado `pending`.
@@ -25,11 +24,12 @@ Estado actual del proyecto:
   "Estado de la cita" (para no confirmar por error al solo contactar al cliente).
 - WhatsApp principal es manual mediante `wa.me`; no se debe usar Twilio/Meta como flujo principal por ahora.
 - Selector de pais reutilizable para telefonos (Mexico +52, EE.UU. +1) en `components/PhoneInput.tsx`.
-- Mercado Pago fue eliminado del flujo y del codigo local.
+- Mercado Pago, anticipos reales, WhatsApp automático, recordatorios automáticos, Plan/facturación, suscripciones, backups desde la app, integraciones externas completas, web personalizada por cliente, onboarding autoservicio y reportes contables avanzados NO son parte del producto actual.
 - Modulos extraidos de `App.tsx` a `src/features/<feature>/` (onboarding, cash,
   stats, suppliers, reservations, clients, catalog, employees, admin).
 - Existe capa normalizada de base de datos, pero el frontend todavia mantiene compatibilidad con `businesses.app_state`.
-- `App.tsx` sigue siendo grande, pero ya se extrajeron varias secciones a `features/`.
+- `App.tsx` quedo en ~1336 lineas tras extraer todas las vistas grandes a
+  `features/` (auth, dashboard, calendar, appointments) con lazy loading (2026-06-10).
 
 # Objetivos del Sistema
 
@@ -46,7 +46,10 @@ Funcionalidades principales actuales:
 - Onboarding obligatorio (P2): el admin completa datos del negocio en su primer
   ingreso; se marca `businesses.onboarding_completed`.
 - Dashboard con KPIs, ingresos, citas proximas, resumen semanal y visualizaciones.
-- Calendario mensual/semanal visual.
+- Calendario mensual/semanal visual. Las celdas del mes muestran mini-preview de
+  hasta 2 citas (hora + estado + primer nombre) en escritorio y conteo compacto en
+  móvil; leyenda Confirmada/Pendiente/Cancelada; el panel del día tiene botón
+  "Nueva cita" con la fecha precargada.
 - Citas con filtros por fecha, estado, empleado, servicio, busqueda y ORDENAMIENTO
   ("Más recientes" / "Nombre del cliente"). El filtro por origen se eliminó.
 - Ficha de cliente como modal centrado con historial de citas (P9).
@@ -57,13 +60,23 @@ Funcionalidades principales actuales:
   (estado, pago, editar, eliminar, WhatsApp) viven en una VENTANA DE DETALLE CENTRADA
   (`AppointmentDetailModal`, patron `j-modal`); las tablas son solo lectura. El estado
   y el pago se cambian con botones grandes (sin selects).
-- Marcar cita como `paid` o `none` (solo desde la ventana de detalle).
-- Corte de caja: captura manual por método (efectivo, tarjeta crédito/débito,
-  transferencia), reconciliación automática (Total recibido / esperado / diferencia)
-  y un segundo paso de retiro (Total en caja / Monto a retirar / Efectivo restante).
-  Sin fondo inicial. Pantalla del dia + historial, con exportacion CSV.
-- Estadisticas (P6): filtros por periodo (semana/mes/ano), graficas, margen
-  estimado y comparacion contra periodo anterior.
+- Marcar cita como `paid` o `none` (solo desde la ventana de detalle). Al marcar
+  `paid` se elige el MÉTODO de pago (efectivo / t. crédito / t. débito /
+  transferencia, tipo `SalePaymentMethod`, el mismo de Ventas); nada se marca hasta
+  elegir método. Persiste en `business_appointments.payment_method`.
+- Corte de caja v2: CONTEO VERIFICADO por método. El sistema calcula el ESPERADO
+  por método (citas pagadas con método + ventas de productos del día) y el usuario
+  solo teclea lo contado; cada fila muestra Esperado | Contado | Diferencia. Los
+  cobros sin método registrado aparecen como fila aparte. Cierre con retiro
+  (Monto a retirar / Efectivo restante, SOLO efectivo). Sin fondo inicial.
+  Historial clickeable con detalle por corte y borrado con confirmación en dos
+  pasos. Día + historial con exportación Excel. Las VENTAS DE PRODUCTOS entran al
+  total esperado y al detalle del día.
+- Estadisticas (P6 · v2): filtros por periodo (semana/mes/ano), toggle Línea/
+  Barras, comparativa visual contra el periodo anterior (línea punteada), margen
+  estimado y top de servicios/productos. Las VENTAS DE PRODUCTOS entran a
+  ingresos, margen, serie, ranking de empleados y export. La gráfica formatea
+  moneda con `formatCurrency`/`formatCurrencyShort` (no números crudos).
 - Empleados/equipo operativo en el grupo Operacion (P7).
 - Productos y servicios en el grupo Operacion (P4).
 - Proveedores: CRUD con WhatsApp directo (P10).
@@ -71,10 +84,9 @@ Funcionalidades principales actuales:
 - Configuracion del negocio:
   - Datos generales.
   - Horarios.
-  - Sitio publico.
-  - Integraciones.
-  - Plan informativo.
-  - (Servicios y Equipo se movieron al grupo Operacion; ya no viven en Configuracion.)
+  - Reservas publicas.
+  - Negocios (solo super_admin).
+  - Se eliminaron las pestanas decorativas de Integraciones, Notificaciones y Plan/facturacion.
 - Sitio publico `/p/:slug` con:
   - Catalogo de servicios.
   - Seleccion de empleado.
@@ -84,22 +96,21 @@ Funcionalidades principales actuales:
 - Creacion de cuentas directa via Edge Function `admin-manage-user` (sin codigos).
 - Reset/flujo de acceso soportado por Supabase Auth.
 - Boton visible "WhatsApp" por cita/pedido que abre WhatsApp Web/app con `https://wa.me/...`.
-- Tests estaticos minimos con `node --test`.
+- Tests estaticos con `node --test` (`npm test`) + E2E con Playwright (`npm run
+  test:e2e`): smoke sin credenciales y flujos autenticados gated por env.
 
 Funcionalidades futuras planeadas o pendientes:
 
 - Completar migracion a tablas normalizadas como fuente unica, eliminando dependencia operativa de `app_state`.
-- Dividir `App.tsx` en modulos por seccion y aplicar lazy loading.
+- ~~Dividir `App.tsx` en modulos por seccion y aplicar lazy loading.~~ (HECHO 2026-06-10)
 - Onboarding wizard para nuevos negocios.
 - Historial/ficha individual de cliente.
 - Auditoria visible en UI.
 - Google Calendar o bloqueo externo de disponibilidad.
-- Recordatorios automaticos solo si se decide reactivar proveedor WhatsApp API.
-- Monitoreo real con endpoint externo o Sentry/LogRocket.
-- CI/CD con GitHub Actions.
-- Tests funcionales reales con Playwright o Vitest.
-- Backups automaticos Supabase.
-- Politicas legales: terminos de servicio y privacidad.
+- No reintroducir recordatorios automaticos, WhatsApp API, Mercado Pago, suscripciones o integraciones externas sin decision nueva de producto.
+- CI/CD con GitHub Actions sigue pendiente.
+- Tests funcionales/E2E adicionales siguen pendientes.
+- Textos legales base existen en `/terminos` y `/privacidad`; deben revisarse con abogado antes de venta masiva.
 
 # Arquitectura General
 
@@ -162,7 +173,8 @@ Estructura relevante:
 │   │   ├── format.ts
 │   │   └── routing.ts
 │   ├── pages
-│   │   └── PublicBookingSite.tsx
+│   │   ├── PublicBookingSite.tsx
+│   │   └── LegalPage.tsx          # /terminos y /privacidad (publicas)
 │   └── services
 │       ├── databaseService.ts
 │       ├── monitoringService.ts
@@ -183,10 +195,8 @@ Estructura relevante:
 │   ├── fix_profile_access.sql
 │   ├── setup_full.sql           # instalacion consolidada idempotente (todo en orden)
 │   └── functions
-│       ├── admin-manage-user/index.ts   # crea negocios/admins/empleados + onboarding
+│       ├── admin-manage-user/index.ts   # crea negocios/admins/empleados + onboarding + elimina negocios
 │       ├── public-booking/index.ts
-│       ├── send-whatsapp/index.ts
-│       ├── send-reminders/index.ts
 │       └── health/index.ts
 └── tests
     └── static-quality.test.mjs
@@ -199,6 +209,7 @@ Flujo general de la aplicacion:
 3. Rutas soportadas (ver `src/lib/routing.ts`):
    - `/`: dashboard/login.
    - `/p/:slug`: sitio publico de reservas.
+   - `/terminos` y `/privacidad`: paginas legales publicas (`pages/LegalPage.tsx`).
    - `/forgot-password`: ruta reconocida, flujo ligado a Supabase.
    - (La ruta `/signup?code=...` y la pagina `SignupWithCode.tsx` fueron eliminadas
      junto con el sistema de invitaciones por codigo.)
@@ -250,20 +261,20 @@ Servicios externos:
 - Supabase Edge Functions:
   - `admin-manage-user`: OBLIGATORIA. Crea negocios+administradores (super_admin),
     crea/edita/elimina empleados (admin) y completa el onboarding. Usa service_role.
-    Acciones: `create_business_admin`, `create_employee`, `update_employee`,
-    `delete_employee`, `complete_onboarding`.
+    Acciones: `create_business_admin`, `delete_business`, `create_employee`,
+    `update_employee`, `delete_employee`, `complete_onboarding`.
   - `public-booking`: activa para reservas publicas.
-  - `health`: activa para monitoreo basico.
-  - `send-whatsapp`: existe/desplegada como preparacion, pero no es flujo principal.
-  - `send-reminders`: existe/desplegada como preparacion, pero no debe usarse sin decision explicita.
+  - `health`: diagnostico tecnico basico; no representa SLA comercial.
 - WhatsApp actual usa solo `wa.me` desde el frontend.
-- Mercado Pago fue removido y no debe reintroducirse sin nueva decision de producto.
-- Twilio/Meta WhatsApp API no son dependencia activa del producto actual.
+- Mercado Pago, Twilio/Meta WhatsApp API y recordatorios automaticos fueron retirados del producto activo y no deben reintroducirse sin nueva decision explicita.
 
 # Decisiones Tecnicas Importantes
 
 - El sistema se llama Jack. No volver a nombres anteriores como "Service Suite" o "demo".
-- La estetica actual es editorial B/W, minimalista y premium. No reintroducir la paleta verde/spa legacy.
+- La estetica es B/W minimalista. DECISION (2026-06-04): se ELIMINO el estilo
+  "editorial" con fuente serif en cursiva (Instrument Serif) de titulos/acentos/estados.
+  Direccion actual: tipografia PLANA (Inter), sin cursivas ni serif, clara y CONSISTENTE
+  en todo el sistema. No reintroducir cursivas/serif decorativos ni la paleta verde/spa legacy.
 - El sistema debe ser generico para negocios de servicios, no quedar acoplado a SPA.
 - El registro publico esta cerrado. Las cuentas se crean DIRECTAMENTE con la Edge
   Function `admin-manage-user` (service_role): super_admin crea negocios+admins,
@@ -357,7 +368,7 @@ WhatsApp:
 - Decision posterior: no usar WhatsApp automatico desde Supabase por ahora.
 - Flujo principal actual: boton "WhatsApp" en cada cita/pedido abre `wa.me`.
 - El boton usa mensaje prellenado con negocio, servicio, fecha, hora y empleado.
-- `send-whatsapp` y `send-reminders` pueden existir desplegadas, pero son preparacion/futuro, no flujo actual.
+- `send-whatsapp` y `send-reminders` fueron eliminadas del repo; si quedan desplegadas en Supabase por historial, no forman parte de la app y deben retirarse manualmente del dashboard/CLI.
 
 Arquitectura de datos:
 
@@ -488,14 +499,14 @@ Modulos en desarrollo/transicion:
   - Registro existe para cambio de estado/pago.
   - Falta vista de auditoria en UI.
 - Monitoreo:
-  - `monitoringService` existe.
-  - Falta endpoint real configurado en `VITE_MONITORING_ENDPOINT` o integracion formal.
-- Edge Functions de WhatsApp API:
-  - Existen, pero no son flujo principal.
-  - No deben considerarse "activas" a nivel producto.
+  - `monitoringService` es solo registro tecnico/best-effort de errores.
+  - `health` es diagnostico tecnico, no SLA ni monitoreo comercial completo.
+- WhatsApp/API:
+  - El flujo principal y unico activo es manual con `wa.me`.
+  - Las Edge Functions `send-whatsapp` y `send-reminders` fueron eliminadas del repo.
 - Onboarding:
   - Ya no usa invitaciones por codigo.
-  - Falta wizard completo para configurar primer servicio, horarios, equipo y sitio publico.
+  - Wizard inicial ya cubre datos del negocio, horarios, servicios/precios y pasos omitibles de empleados/proveedores/catalogo.
 
 Verificacion Supabase aplicada (2026-06-03):
 
@@ -524,18 +535,30 @@ Verificacion Supabase aplicada (2026-06-03):
 
 Modulos que requieren revision:
 
-- `src/App.tsx`: ~2351 lineas (bajo de ~2808 tras extraer Configuracion a
-  `features/settings/`). Sigue siendo deuda tecnica grande: aun viven aqui routing,
-  auth, dashboard, calendario, citas y varios handlers. El code splitting (#10) ya
-  esta hecho; falta terminar de extraer las vistas grandes (`LoginScreen`,
-  `CalendarView`, `WeeklyView`, `Dashboard`, `NewAppointmentFullScreen`,
-  `AppointmentDetailModal`), mas acopladas y dejadas para una fase futura.
+- `src/App.tsx`: ~1336 lineas (bajo de ~2630 al extraer las vistas grandes en
+  2026-06-10: `LoginScreen` → `features/auth/`, `Dashboard`+`WeeklyView` →
+  `features/dashboard/`, `CalendarView` → `features/calendar/`,
+  `AppointmentDetailModal` y `NewAppointmentFullScreen` → `features/appointments/`,
+  helpers compartidos → `lib/appointmentUi.ts`; todas cargan lazy). Lo que queda en
+  App.tsx es razonable: routing, sesion, shell (sidebar/topbar), handlers de
+  persistencia y las vistas chicas `AppointmentsView`/`EmployeesView`. Nuevas
+  funcionalidades grandes siguen SIN agregarse aqui.
 - `databaseService.ts`: hace demasiadas cosas: perfiles, estado, normalizacion,
   publico, cuentas, auditoria y espejos.
 - RLS de tablas normalizadas debe revisarse antes de produccion con multiples negocios.
 - `public-booking` todavia actualiza `app_state` completo; puede haber race conditions.
-- `send-reminders` y `send-whatsapp` deben eliminarse o marcarse claramente como futuro si no se usaran.
+- `send-reminders` y `send-whatsapp` fueron eliminadas del repo; no reintroducir sin aprobacion.
 - `.supabase/.temp` existe localmente; no debe versionarse.
+
+
+## Actualizacion 2026-06-30 — Limpieza de alcance y Superadmin
+
+- Se eliminaron del producto activo: Mercado Pago/anticipos reales, WhatsApp automatico con API, recordatorios automaticos, Plan & facturacion, suscripciones reales, SLA/monitoreo comercial completo, backups desde la app, integraciones externas completas, web personalizada por cliente, onboarding 100% autoservicio y reportes avanzados contables.
+- `SettingsEditorial` solo muestra secciones activas: Negocio, Horario de atención, Reservas públicas y Negocios (super_admin).
+- `SettingsBusinessesAdmin` fue rediseñado: KPIs, busqueda, mejor alta de negocios y boton Eliminar.
+- Eliminar negocio es una baja operativa segura: `admin-manage-user` accion `delete_business` marca `businesses.active=false`, apaga `public_site_enabled`, desactiva perfiles vinculados y marca empleados como inactivos. No hard-deletea historico.
+- Se eliminaron del repo `supabase/functions/send-whatsapp` y `supabase/functions/send-reminders`. WhatsApp queda exclusivamente manual con `wa.me`.
+- `LegalPage.tsx` contiene terminos y aviso de privacidad integrales para Mexico; deben revisarse con abogado antes de venta masiva.
 
 # Pendientes Prioritarios
 
@@ -547,23 +570,19 @@ Bugs/riesgos conocidos:
 - Capa normalizada ya es fuente principal de lectura, pero todavia no es fuente unica de escritura.
 - Public booking puede pisar cambios si entra reserva al mismo tiempo que admin guarda.
 - No hay tests E2E reales.
-- No hay monitoreo productivo configurado.
+- No hay SLA/monitoreo comercial completo por decision de producto actual.
 - No hay vista de historial/auditoria.
-- No hay backups automatizados definidos desde proceso de negocio.
+- No hay backups desde la app por decision de producto actual.
 
 Mejoras prioritarias:
 
 1. Cambiar operaciones CRUD para escribir directamente en tablas normalizadas por entidad.
 2. Agregar bandera `normalized_ready` por negocio cuando la migracion este validada.
 3. Dejar `app_state` solo para configuracion o eliminarlo gradualmente.
-4. Dividir `App.tsx`:
-   - `features/dashboard`
-   - `features/calendar`
-   - `features/appointments`
-   - `features/settings`
-   - `features/public-booking`
-   - `features/auth`
-5. Agregar lazy loading por seccion.
+4. Dividir `App.tsx`. (HECHO 2026-06-10: `features/auth`, `features/dashboard`,
+   `features/calendar`, `features/appointments` extraidos con lazy; `features/settings`
+   ya existia. App.tsx ~1336 lineas, chunk principal 472 kB sin advertencia.)
+5. Agregar lazy loading por seccion. (HECHO: todas las secciones y modales grandes.)
 6. Crear onboarding wizard para negocios nuevos.
 7. Crear ficha de cliente con historial.
 8. Mostrar auditoria de cita.
@@ -633,11 +652,23 @@ clientes, empleados, citas, servicios, cortes, proveedores y catalogo usen tabla
 fuente principal, dejando `app_state` solo para configuracion ligera.
 
 Avance (2026-06-01): CLIENTES y CITAS ya son fuente principal de LECTURA (loader
-normalizado con fallback por entidad). `app_state` se mantiene como espejo/compat (se
-sigue escribiendo en cada guardado). Como las lecturas de clientes/citas ya no dependen
-del JSON, una escritura de admin con sesion vieja deja `app_state` desfasado pero NO
-pierde citas/clientes en pantalla (se releen de las tablas). Falta migrar el resto de
-entidades y, a futuro, escribir directo a tablas en vez del JSON completo.
+normalizado con fallback por entidad). `app_state` se mantiene como espejo/compat.
+
+Avance (2026-06-04, #1): CITAS y CLIENTES ya también se ESCRIBEN directo por fila
+(`upsertAppointment`/`upsertClient`/`softDeleteAppointment`), NO reescribiendo el JSON
+completo. El upsert por fila es atómico → sin race entre citas. `app_state` se sincroniza
+best-effort (`saveAppStateBestEffort`). `public-booking` checa doble-booking también
+contra la tabla.
+
+Avance (2026-06-12, #1/#2): se migraron a escritura por fila CATÁLOGO
+(`upsertService`/`upsertProduct`/`upsertCategory` + import CSV secuencial),
+PROVEEDORES (`upsertSupplier`), CORTE DE CAJA (`upsertCashCut`) y VENTAS de productos
+(`insertSale` + `updateProductStock` en la nueva tabla `business_sales`, ver
+`supabase/sales.sql`). En `App.tsx` esas secciones usan `applyWithStateMirror`
+(UI local + `app_state` espejo best-effort) en vez de `saveBusinessState`. SOLO
+`Configuración` (config ligera) sigue escribiendo el `app_state` completo, por
+diseño. PENDIENTE: empleados (su alta real ya pasa por la Edge Function, no por
+app_state) y, a futuro, retirar `app_state` como espejo.
 
 ### 2. Datos borrados pueden reaparecer — RESUELTO para citas/clientes (2026-06-01)
 
@@ -656,19 +687,22 @@ create/edit, sin tocar `deleted_at`, así un registro borrado no resucita.
 Pendiente: empleados, servicios, catálogo, proveedores y corte de caja todavía dependen
 del `upsert` sin sincronización de borrado (no se migraron en este lote).
 
-### 3. Empleados pueden no guardar cambios por RLS
+### 3. Empleados pueden no guardar cambios por RLS — RESUELTO para citas (2026-06-04)
 
 Archivos principales:
 
 - `src/App.tsx`
 - `src/services/databaseService.ts`
-- `supabase/schema.sql`
-- `supabase/normalized_schema.sql`
 
-El rol `employee` tiene restricciones para actualizar `businesses`, pero muchas acciones
-todavia guardan mediante `saveBusinessState`, que actualiza `businesses.app_state`. En la
-practica un empleado podria ver un cambio optimista en UI y perderlo al recargar. Las acciones
-de empleados deben escribir directamente en `business_appointments` con RLS especifica.
+Estado: RESUELTO para citas (#1) y VENTAS (#1, 2026-06-12). Las acciones de cita
+(crear/editar/estado/pago/borrar), el alta de cliente y el REGISTRO DE VENTAS escriben
+DIRECTO por fila (`upsertAppointment`/`upsertClient`/`softDeleteAppointment`/`insertSale`/
+`updateProductStock`), que la RLS de `business_appointments`/`business_clients`/
+`business_sales` sí permite al `employee`. Ya no dependen de `update businesses` (que el
+employee no puede). El `app_state` se sincroniza best-effort (`saveAppStateBestEffort`).
+Esto cerró el bug por el que un empleado vendiendo en la pestaña Ventas no podía guardar.
+El empleado solo accede a dashboard/calendario/agenda(citas+ventas), así que las demas
+secciones (config/catálogo/proveedores/caja) no le aplican.
 
 ### 4. Borrar empleados puede dejar citas huerfanas
 
@@ -691,8 +725,18 @@ Archivos principales:
 - `supabase/suppliers.sql`
 
 Varias tablas usan `id text primary key` global. Si dos negocios generan el mismo ID
-(`srv-base`, por ejemplo), pueden chocar. Usar UUID global real o llaves compuestas
-`(business_id, id)`.
+pueden chocar y un upsert `on conflict (id)` podría REASIGNAR la fila a otro negocio.
+
+Estado (2026-06-04): riesgo práctico NEUTRALIZADO sin migración destructiva.
+- `uid()` es aleatorio (`prefix-random-timestamp`) y los negocios nuevos arrancan con
+  `services: []` (sin ids deterministas) → colisión global casi imposible.
+- `supabase/harden_multitenant_pks.sql` agrega un TRIGGER guardián
+  (`jack_block_business_id_change`) en todas las tablas normalizadas que BLOQUEA
+  cualquier UPDATE que intente cambiar `business_id` → un upsert cruzado falla en vez
+  de corromper.
+Pendiente (opcional, CON RESPALDO): migrar a PK compuesta `(business_id, id)` o UUID.
+Es destructivo (drop/recreate PK + FKs + RLS + onConflict del front + edge functions),
+por eso NO se ejecutó; el guardián cubre el riesgo mientras tanto.
 
 ### 6. Carga normalizada parcial puede ocultar datos reales
 
@@ -741,67 +785,76 @@ normalizado; migrar a escritura directa a tablas normalizadas como fuente princi
 parte de #2/#6 y se hara con respaldo. Un rate limit persistente (tabla dedicada) queda
 para cuando se aborde la fundacion de datos.
 
-### 9. Edge Functions de WhatsApp automatico siguen existiendo
+### 9. Edge Functions de WhatsApp automatico — RESUELTO (2026-06-30)
 
-Archivos principales:
+Archivos retirados del repositorio:
 
 - `supabase/functions/send-whatsapp/index.ts`
 - `supabase/functions/send-reminders/index.ts`
 
-La decision actual del producto es NO usar WhatsApp automatico con Twilio/Meta. El flujo principal
-debe ser boton manual `wa.me`. Si estas funciones quedan desplegadas y algun dia se configuran
-secrets, deben protegerse con tokens fuertes o eliminarse para evitar abuso/costos externos.
+La decision actual del producto es NO usar WhatsApp automatico con Twilio/Meta ni recordatorios automaticos. El flujo principal debe ser boton manual `wa.me`. Si alguna funcion quedo desplegada en Supabase de despliegues anteriores, debe eliminarse desde el dashboard/CLI de Supabase o dejarse sin secrets; la app ya no la llama.
 
-### 10. `App.tsx` sigue siendo grande — PARCIALMENTE RESUELTO
+### 10. `App.tsx` sigue siendo grande — RESUELTO (2026-06-10)
 
 Archivo principal:
 
 - `src/App.tsx`
 
-Estado: se hizo un primer ataque (2026-05-31). Se extrajo Configuracion a
-`features/settings/SettingsEditorial.tsx` y se aplico code splitting con
-`React.lazy` + `Suspense` a los componentes pesados o de una sola seccion/ruta
-(`PublicBookingSite`, `RevenueChart`/recharts, `StatsManager`, `CatalogManager`,
-`CashManager`, `SuppliersManager`, `EmployeesManager`, `WebReservationsView`,
-`ClientDetailModal`, `SettingsEditorial`). Resultado: chunk principal 960 kB → 484 kB
-(gzip 264 → 138 kB) y se quito la advertencia de Vite.
+Estado: RESUELTO en dos fases.
+- Fase 1 (2026-05-31): se extrajo Configuracion a `features/settings/` y se aplico
+  code splitting con `React.lazy` + `Suspense` a los componentes pesados
+  (`PublicBookingSite`, recharts, managers de secciones). Chunk 960 kB → 484 kB.
+- Fase 2 (2026-06-10): se extrajeron las vistas grandes restantes, todas lazy:
+  `LoginScreen` → `features/auth/`, `Dashboard` + `WeeklyView` →
+  `features/dashboard/`, `CalendarView` → `features/calendar/`,
+  `AppointmentDetailModal` y `NewAppointmentFullScreen` → `features/appointments/`.
+  Los helpers compartidos (`appointmentStatusLabel`, `appointmentStatusChoices`,
+  `PAY_METHOD_LABELS`) se movieron a `src/lib/appointmentUi.ts`. `App.tsx` bajo de
+  ~2630 a ~1336 lineas y el chunk principal de 504 kB a 472 kB (gzip 136 kB), sin
+  advertencia de Vite.
 
-Pendiente: `App.tsx` (~2351 lineas) todavia mezcla routing, auth, dashboard,
-calendario, citas y handlers. Falta extraer las vistas grandes restantes
-(`LoginScreen`, `CalendarView`, `WeeklyView`, `Dashboard`, `NewAppointmentFullScreen`,
-`AppointmentDetailModal`), que estan mas acopladas (comparten helpers como
-`appointmentStatusLabel`, `pageMeta`, `emptyAppointment`) y se dejaron para una fase
-futura. Nuevas funcionalidades grandes NO deben agregarse a `App.tsx`.
+En `App.tsx` quedan routing, sesion, shell (sidebar/topbar/nav), handlers de
+persistencia y las vistas chicas `AppointmentsView`/`EmployeesView`/`EmployeeSettings`.
+Regla vigente: nuevas funcionalidades grandes NO deben agregarse a `App.tsx`.
 
 ## Funciones Incompletas o Simuladas
 
-- Normalizacion de BD: existe, pero todavia no es fuente principal.
-- WhatsApp automatico: existe como edge function, pero no debe ser flujo principal por ahora.
-- Recordatorios automaticos: no considerarlos listos para venta.
-- Plan y facturacion: informativo, sin cobros ni suscripcion real.
-- Google Calendar: placeholder.
-- Onboarding: solo captura datos basicos; falta configurar horarios, servicios, equipo y sitio publico.
-- Catalogo: administra productos/servicios, pero no registra ventas de productos.
-- Proveedores: funcional en UI, pero persiste en `app_state`.
-- Cortes de caja: funcional, pero requiere corregir calculo de efectivo y usar tabla real.
-- Tests: pasan, pero faltan pruebas E2E de flujos reales.
+- Normalizacion de BD: existe, pero `app_state` aun vive como compatibilidad.
+- WhatsApp automatico: eliminado del repo; el producto usa `wa.me` manual.
+- Recordatorios automaticos: eliminados del producto actual.
+- Plan y facturacion: eliminado de la UI actual.
+- Google Calendar/integraciones externas completas: fuera del alcance actual.
+- Onboarding: wizard de 4 pasos (sobre ti, horarios, primer servicio, equipo) (2026-06-12).
+  Pendiente opcional: activar/configurar el sitio publico desde el mismo wizard.
+- Catalogo: administra productos/servicios; las VENTAS de productos se registran en la
+  pestaña Ventas (tabla `business_sales`, escritura por fila) (2026-06-12).
+- Proveedores: funcional en UI; escribe por fila (`upsertSupplier`) + espejo app_state.
+- Cortes de caja: corte v2 por metodo; escribe por fila (`upsertCashCut`) + espejo.
+- Tests: estaticos (node --test, 16) + E2E Playwright (smoke siempre; flujos
+  autenticados gated por `JACK_E2E_EMAIL`/`JACK_E2E_PASSWORD`) (2026-06-12).
 
 ## Prioridades Recomendadas
 
 Prioridad alta:
 
-1. Hacer tablas normalizadas fuente principal.
-2. Corregir guardado de acciones de empleados.
-3. Resolver deletes/sincronizacion para que datos borrados no reaparezcan.
+1. Hacer tablas normalizadas fuente principal. (CASI: citas, clientes, catalogo,
+   proveedores, caja y ventas escriben por fila; solo config sigue en app_state.)
+2. Corregir guardado de acciones de empleados. (HECHO: citas y ventas por fila, RLS
+   permite al employee; 2026-06-12.)
+3. Resolver deletes/sincronizacion para que datos borrados no reaparezcan. (HECHO para
+   citas/clientes/servicios/productos/proveedores/cortes; patron anti-resurreccion.)
 4. Corregir corte de caja por metodo de pago. (HECHO, #7)
 5. Endurecer `public-booking`. (HECHO, lote acotado 2026-06-01; falta solo la
    migracion a tablas normalizadas, que pertenece a #2/#6.)
-6. Corregir llaves primarias multi-tenant.
+6. Corregir llaves primarias multi-tenant. (Mitigado con trigger guardian, #5.)
 7. Desactivar o proteger WhatsApp automatico. (HECHO, #9)
+8. Agregar pruebas E2E. (HECHO: Playwright smoke + flujos gated; 2026-06-12.)
+9. Paginas legales (terminos/privacidad). (HECHO: /terminos y /privacidad; falta
+   completar campos [entre corchetes] y revision legal.)
 
 Prioridad media:
 
-1. Separar `App.tsx` en modulos por feature. (PARCIAL: Settings extraido; faltan las
+1. Separar `App.tsx` en modulos por feature. (HECHO 2026-06-10; antes PARCIAL: Settings extraido; faltaban las
    vistas grandes acopladas.)
 2. Completar onboarding real.
 3. Conectar catalogo, proveedores y cortes a tablas reales.
@@ -926,7 +979,7 @@ Buenas practicas especificas:
 - No guardar secretos en codigo ni en `CLAUDE.md`.
 - No usar `dist` como fuente; es output de build.
 - Evitar meter mas logica en `App.tsx`; nuevas funciones grandes deben ir a archivos separados.
-- Mantener el lenguaje visual editorial B/W.
+- Mantener el lenguaje visual B/W minimalista, PLANO y consistente (sin serif/cursiva).
 - No agregar CRUDs redundantes si una accion ya vive naturalmente en Citas/Calendario.
 - Para nuevas integraciones externas, primero definir si son parte del MVP vendible o solo preparacion futura.
 - Para el sitio publico, nunca confiar en precio/duracion enviados por el cliente; siempre recalcular desde catalogo del negocio.
@@ -971,12 +1024,25 @@ Forma granular (equivalente, por archivos, en este orden):
    en clientes/citas + indices parciales; correr despues de normalized_schema.sql)
 9. `supabase/normalize_catalog.sql` (lote C #2/#6: RPC backfill de productos/categorias;
    correr DESPUES de catalog_products.sql)
+9b. `supabase/product_inventory.sql` (inventario: columnas `stock`/`low_stock` en
+    business_products; correr DESPUES de catalog_products.sql)
 10. `supabase/normalize_suppliers.sql` (lote D #2/#6: deleted_at + RPC backfill de
     proveedores; correr DESPUES de suppliers.sql)
 11. `supabase/normalize_cash_cuts.sql` (lote E #2/#6: columnas por metodo/retiro +
     deleted_at + RPC backfill de cortes; correr DESPUES de cash_cuts.sql)
-12. `supabase/remove_mercado_pago.sql` (solo si hubo tablas legacy de Mercado Pago)
-13. `supabase/create_admin_profile.sql` (UUID manual)
+11b. `supabase/cash_cut_v2.sql` (corte v2: `business_appointments.payment_method` +
+     esperado por metodo y ventas en `business_cash_cuts`; correr DESPUES de
+     normalized_schema.sql y cash_cuts.sql; el front tolera que falte)
+11c. `supabase/sales.sql` (ventas de productos por fila en `business_sales`, con RLS
+     que permite al `employee` registrar ventas; correr DESPUES de schema.sql; el
+     front tolera que falte —la venta queda en app_state mientras tanto)
+12. `supabase/harden_multitenant_pks.sql` (#5: trigger guardián que bloquea cambiar
+    `business_id` en UPDATE; idempotente, no destructivo; correr al final)
+13. `supabase/remove_mercado_pago.sql` (solo si hubo tablas legacy de Mercado Pago)
+14. `supabase/create_admin_profile.sql` (UUID manual)
+
+Mantenimiento (no parte del install): `supabase/fix_corrupted_phones.sql` limpia
+teléfonos arruinados por el bug viejo de PhoneInput (revisar el SELECT antes del UPDATE).
 
 Nota final:
 

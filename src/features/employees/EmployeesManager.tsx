@@ -8,10 +8,11 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronRight, Plus, Trash2, X } from "lucide-react";
+import { Check, ChevronRight, Download, Plus, Trash2, X } from "lucide-react";
 import { StatusBadge } from "../../components/Badge";
 import { JEmpty } from "../../components/Editorial";
 import { databaseService, type EmployeeAccount } from "../../services/databaseService";
+import { downloadExcel } from "../../lib/excelExport";
 import { initialsFromName, uid } from "../../lib/format";
 import type { Appointment, Employee, EmployeeStatus } from "../../types";
 
@@ -146,6 +147,21 @@ export function EmployeesManager({
     }
   };
 
+  const exportExcel = () => {
+    downloadExcel("empleados", "Empleados", employees.map((employee) => {
+      const account = accountById.get(employee.id);
+      return {
+        Empleado: employee.name,
+        Correo: account?.email ?? "",
+        Acceso: account?.profileId ? "Con acceso" : "Sin acceso",
+        Puesto: employee.position,
+        Estado: employee.status,
+        Citas: appointmentCount.get(employee.id) ?? 0
+      };
+    }));
+    onToast("Exportación descargada");
+  };
+
   return (
     <section>
       <div className="j-stat-strip">
@@ -157,7 +173,10 @@ export function EmployeesManager({
           <div className="j-stat-l">Total equipo</div>
           <div className="j-stat-v">{employees.length}</div>
         </div>
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          <button className="j-btn" onClick={exportExcel} disabled={employees.length === 0}>
+            <Download size={13} strokeWidth={2.25} /> Exportar
+          </button>
           <button className="j-btn j-btn-primary" onClick={startCreate} disabled={!!draft || busy}>
             <Plus size={13} strokeWidth={2.25} /> Nuevo empleado
           </button>

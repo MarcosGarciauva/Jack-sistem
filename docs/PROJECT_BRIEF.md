@@ -1,66 +1,82 @@
 # Jack - Estado actual del proyecto
 
-Jack es una aplicacion web para negocios de servicios que trabajan con citas. El objetivo es venderla a spas, esteticas, barberias, clinicas, consultorios, talleres y negocios similares.
+Jack es una aplicación web para negocios de servicios que trabajan con citas, clientes, empleados, ventas internas, catálogo, proveedores y corte de caja. El objetivo es venderla a spas, estéticas, barberías, clínicas, consultorios, talleres y negocios similares como sistema instalado y asistido, no como registro público autoservicio.
 
 ## Estado actual
 
-La app ya no usa cuentas falsas ni almacenamiento local para iniciar sesion. El acceso ahora esta pensado para funcionar con Supabase Auth.
-
-El flujo correcto es:
-
-1. Crear el usuario en Supabase Authentication.
-2. Ejecutar `supabase/schema.sql`.
-3. Ejecutar `supabase/create_admin_profile.sql` cambiando el UUID y correo del usuario.
-4. Entrar a Jack con correo y contrasena desde la pantalla de login.
-
-No existe registro publico. Solo usuarios creados desde Supabase o por un panel interno futuro pueden entrar.
+- Frontend React + TypeScript + Vite.
+- Login real con Supabase Auth.
+- Roles reales: `super_admin`, `admin`, `employee`.
+- El `super_admin` crea negocios y administradores desde Configuración > Negocios.
+- El administrador del negocio crea empleados con correo y contraseña desde Equipo.
+- No existe registro público abierto.
+- WhatsApp funciona manualmente con enlaces `wa.me`.
+- Reservas públicas funcionan desde `/p/:slug` y llegan a Citas > Reservaciones web.
+- Mercado Pago, anticipos reales, WhatsApp automático, recordatorios automáticos, plan/facturación y suscripciones reales NO forman parte del producto actual.
 
 ## Archivos clave
 
-- `src/App.tsx`: interfaz principal, login, dashboard, clientes, citas, calendario, empleados, estadisticas y configuracion.
-- `src/services/supabaseClient.ts`: conexion con Supabase usando variables de entorno.
-- `src/services/databaseService.ts`: carga perfil, carga negocio y guarda cambios del negocio.
-- `supabase/schema.sql`: tablas y policies de produccion.
-- `supabase/create_admin_profile.sql`: script para vincular el primer usuario administrador.
-- `public/assets/jack-logo.png`: logo del sistema.
+- `src/App.tsx`: shell principal, sesión, navegación y handlers.
+- `src/features/`: pantallas extraídas por área.
+- `src/services/databaseService.ts`: conexión de datos, perfiles, negocios, CRUD normalizado y llamadas a Edge Functions.
+- `src/services/whatsappService.ts`: WhatsApp manual vía `wa.me`.
+- `src/pages/PublicBookingSite.tsx`: página pública de reservas.
+- `src/pages/LegalPage.tsx`: términos y aviso de privacidad.
+- `supabase/setup_full.sql`: instalación consolidada de BD.
+- `supabase/functions/admin-manage-user/index.ts`: creación de negocios, administradores, empleados, onboarding y eliminación segura de negocios.
+- `supabase/functions/public-booking/index.ts`: reservas públicas.
 
-## Modelo de datos actual
+## Modelo de datos
 
-La tabla `businesses` guarda el estado operativo del negocio en `app_state` como JSON:
+La app ya lee entidades principales desde tablas normalizadas con fallback por entidad:
 
-- Configuracion del negocio.
-- Clientes.
-- Empleados.
-- Citas.
-- Servicios.
-- Horarios.
+- `business_services`
+- `business_employees`
+- `business_clients`
+- `business_appointments`
+- `business_products`
+- `business_suppliers`
+- `business_cash_cuts`
+- `business_sales`
 
-La tabla `profiles` vincula usuarios de Supabase Auth con Jack:
+`businesses.app_state` sigue existiendo como compatibilidad/espejo, pero la dirección técnica es migrar gradualmente escrituras restantes a tablas por entidad.
 
-- `id`: mismo UUID del usuario en `auth.users`.
-- `email`.
-- `full_name`.
-- `role`: `super_admin`, `admin` o `employee`.
-- `business_id`.
-- `employee_id`.
-- `active`.
+## Producto actual
 
-La tabla `payments` queda lista para Mercado Pago.
+Incluido:
 
-## Importante
+- Agenda y calendario.
+- Reservas públicas conectadas.
+- Clientes y citas.
+- Equipo/empleados.
+- Servicios, productos y proveedores.
+- Ventas internas.
+- Estados pagado/no pagado y método de pago interno.
+- Corte de caja por método.
+- Estadísticas operativas.
+- Exportación a Excel.
+- Términos y aviso de privacidad base.
 
-- No poner access tokens privados en frontend.
-- Mercado Pago debe implementarse con backend o edge functions.
-- Los anticipos de clientes finales deben ir a la cuenta del negocio, no a la cuenta del proveedor de Jack.
-- Los empleados pueden crear citas.
-- Solo admin puede eliminar citas y modificar configuracion del negocio.
+No incluido por decisión de producto:
 
-## Pendientes recomendados
+- Mercado Pago o anticipos reales.
+- WhatsApp automático con API.
+- Recordatorios automáticos.
+- Plan/facturación dentro de la app.
+- Suscripciones reales.
+- SLA/monitoreo comercial completo.
+- Backups desde la app.
+- Integraciones externas completas.
+- Web personalizada por cliente.
+- Onboarding 100% autoservicio.
+- Reportes avanzados contables.
 
-1. Ejecutar SQL en Supabase.
-2. Crear tu usuario Auth.
-3. Vincular tu UUID con `create_admin_profile.sql`.
-4. Probar login real.
-5. Crear flujo para alta de empleados reales.
-6. Crear ruta publica de reservas para cada negocio.
-7. Agregar Edge Function para Mercado Pago.
+## Operación recomendada
+
+1. El superadmin crea el negocio y su administrador.
+2. El administrador entra, completa onboarding y configura horarios/servicios/precios.
+3. El administrador crea empleados con cuenta de acceso.
+4. Si el negocio compra reservas públicas, el superadmin activa la página `/p/:slug`.
+5. El negocio atiende reservaciones web desde Citas > Reservaciones web.
+6. WhatsApp se usa manualmente desde botones del sistema.
+7. La operación diaria se controla desde Citas, Calendario, Ventas y Corte de caja.

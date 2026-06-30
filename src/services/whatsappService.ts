@@ -26,12 +26,18 @@ function buildMessage(
   employee: Employee | undefined,
   config: BusinessConfig
 ) {
+  const firstName = client.name.split(" ")[0] || client.name;
+  const employeeLine = employee?.name ? `Te atenderá: ${employee.name}` : "Te atenderá nuestro equipo.";
   return [
-    `Hola ${client.name.split(" ")[0] || client.name}.`,
-    `Te escribimos de ${config.businessName} sobre tu cita:`,
-    `${appointment.service}`,
-    `${formatLongDate(appointment.date)} a las ${appointment.time}`,
-    `Atiende: ${employee?.name ?? "nuestro equipo"}`
+    `Hola ${firstName}.`,
+    `Te contactamos de ${config.businessName} para confirmar tu asistencia a tu cita.`,
+    `Servicio: ${appointment.service}`,
+    `Fecha: ${formatLongDate(appointment.date)}`,
+    `Hora: ${appointment.time}`,
+    employeeLine,
+    "",
+    "¿Nos confirmas si podrás asistir?",
+    "Responde CONFIRMO para confirmar o CANCELAR si no podrás asistir."
   ].join("\n");
 }
 

@@ -10,9 +10,10 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import { useMemo, useState } from "react";
-import { Check, ChevronRight, MessageCircle, Plus, Trash2, X } from "lucide-react";
+import { Check, ChevronRight, Download, MessageCircle, Plus, Trash2, X } from "lucide-react";
 import { JEmpty } from "../../components/Editorial";
 import { PhoneInput, formatPhoneDisplay } from "../../components/PhoneInput";
+import { downloadExcel } from "../../lib/excelExport";
 import { uid } from "../../lib/format";
 import { databaseService } from "../../services/databaseService";
 import { monitoringService } from "../../services/monitoringService";
@@ -87,6 +88,12 @@ export function SuppliersManager({
     };
     if (draft.mode === "create") persist([item, ...suppliers]);
     else persist(suppliers.map((s) => (s.id === draft.id ? item : s)));
+    // #2: la fila normalizada es la fuente de verdad (app_state queda como espejo).
+    if (businessId) {
+      void databaseService
+        .upsertSupplier(businessId, item)
+        .catch((error) => monitoringService.captureError(error, "supplier.upsert", { businessId, supplierId: item.id }));
+    }
     onToast(draft.mode === "create" ? "Proveedor agregado" : "Cambios guardados");
     setDraft(null);
   };
@@ -114,6 +121,18 @@ export function SuppliersManager({
     }
   };
 
+  const exportExcel = () => {
+    downloadExcel("proveedores", "Proveedores", visible.map((supplier) => ({
+      Proveedor: supplier.name,
+      Contacto: supplier.contactName ?? "",
+      Teléfono: supplier.phone ? formatPhoneDisplay(supplier.phone) : "",
+      Correo: supplier.email ?? "",
+      Categoría: supplier.category ?? "",
+      Notas: supplier.notes ?? ""
+    })));
+    onToast("Exportación descargada");
+  };
+
   return (
     <section>
       <div className="j-stat-strip">
@@ -122,6 +141,9 @@ export function SuppliersManager({
           <div className="j-stat-v">{suppliers.length}</div>
         </div>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          <button className="j-btn" onClick={exportExcel} disabled={visible.length === 0}>
+            <Download size={13} strokeWidth={2.25} /> Exportar
+          </button>
           <button className="j-btn j-btn-primary" onClick={startCreate}>
             <Plus size={13} strokeWidth={2.25} /> Nuevo proveedor
           </button>

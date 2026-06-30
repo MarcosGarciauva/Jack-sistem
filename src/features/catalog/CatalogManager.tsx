@@ -14,6 +14,7 @@
 import { useMemo, useRef, useState } from "react";
 import { ArrowUpDown, Check, ChevronRight, Download, Plus, Trash2, Upload, X } from "lucide-react";
 import { JEmpty } from "../../components/Editorial";
+import { downloadExcel } from "../../lib/excelExport";
 import { databaseService } from "../../services/databaseService";
 import { monitoringService } from "../../services/monitoringService";
 import { formatCurrency, uid } from "../../lib/format";
@@ -37,6 +38,8 @@ interface Row {
   costType: CostType;
   salePrice: number;
   duration?: number;
+  stock?: number;
+  lowStock?: number;
 }
 
 interface Draft {
@@ -49,6 +52,8 @@ interface Draft {
   costType: CostType;
   salePrice: string;
   duration: string;
+  stock: string;
+  lowStock: string;
 }
 
 const COST_LABEL: Record<CostType, string> = { net: "Neto", gross: "Bruto" };
@@ -99,7 +104,9 @@ export function CatalogManager({
       categoryId: p.categoryId,
       cost: p.cost,
       costType: p.costType,
-      salePrice: p.salePrice
+      salePrice: p.salePrice,
+      stock: p.stock,
+      lowStock: p.lowStock
     }));
     return [...serviceRows, ...productRows];
   }, [services, products]);
@@ -129,7 +136,7 @@ export function CatalogManager({
 
   // ── Crear / editar ────────────────────────────────────────────────────────
   const startCreate = () =>
-    setDraft({ mode: "create", itemType: "service", id: uid("cat"), name: "", categoryId: "", cost: "", costType: "net", salePrice: "", duration: "60" });
+    setDraft({ mode: "create", itemType: "service", id: uid("cat"), name: "", categoryId: "", cost: "", costType: "net", salePrice: "", duration: "60", stock: "", lowStock: "" });
 
   const startEdit = (row: Row) =>
     setDraft({
@@ -141,7 +148,9 @@ export function CatalogManager({
       cost: String(row.cost || ""),
       costType: row.costType,
       salePrice: String(row.salePrice || ""),
-      duration: String(row.duration ?? 60)
+      duration: String(row.duration ?? 60),
+      stock: row.stock != null ? String(row.stock) : "",
+      lowStock: row.lowStock != null ? String(row.lowStock) : ""
     });
 
   const persist = (next: Partial<AppState["config"]>) =>
@@ -156,29 +165,37 @@ export function CatalogManager({
 
     if (draft.itemType === "service") {
       const duration = Math.max(5, Number(draft.duration) || 60);
-      if (draft.mode === "create") {
-        const item: ServiceItem = {
-          id: draft.id, name: draft.name.trim(), basePrice: salePrice, duration,
-          depositRequired: false, depositAmount: 0, categoryId, cost, costType: draft.costType
-        };
-        persist({ services: [...services, item] });
-      } else {
-        persist({
-          services: services.map((s) => s.id === draft.id
-            ? { ...s, name: draft.name.trim(), basePrice: salePrice, duration, categoryId, cost, costType: draft.costType }
-            : s)
-        });
+      const existing = services.find((s) => s.id === draft.id);
+      const item: ServiceItem = {
+        ...(existing ?? { depositRequired: false, depositAmount: 0 }),
+        id: draft.id, name: draft.name.trim(), basePrice: salePrice, duration,
+        categoryId, cost, costType: draft.costType
+      };
+      persist({
+        services: draft.mode === "create"
+          ? [...services, item]
+          : services.map((s) => (s.id === draft.id ? item : s))
+      });
+      // #2: la fila normalizada es la fuente de verdad (app_state queda como espejo).
+      if (businessId) {
+        void databaseService
+          .upsertService(businessId, item)
+          .catch((error) => monitoringService.captureError(error, "service.upsert", { businessId, serviceId: item.id }));
       }
     } else {
-      if (draft.mode === "create") {
-        const item: ProductItem = { id: draft.id, name: draft.name.trim(), categoryId, cost, costType: draft.costType, salePrice };
-        persist({ products: [...products, item] });
-      } else {
-        persist({
-          products: products.map((p) => p.id === draft.id
-            ? { ...p, name: draft.name.trim(), categoryId, cost, costType: draft.costType, salePrice }
-            : p)
-        });
+      // Inventario: existencias (entero ≥ 0) y umbral opcional de aviso de stock bajo.
+      const stock = Math.max(0, Math.floor(Number(draft.stock) || 0));
+      const lowStock = draft.lowStock.trim() ? Math.max(0, Math.floor(Number(draft.lowStock) || 0)) : undefined;
+      const item: ProductItem = { id: draft.id, name: draft.name.trim(), categoryId, cost, costType: draft.costType, salePrice, stock, lowStock };
+      persist({
+        products: draft.mode === "create"
+          ? [...products, item]
+          : products.map((p) => (p.id === draft.id ? item : p))
+      });
+      if (businessId) {
+        void databaseService
+          .upsertProduct(businessId, item)
+          .catch((error) => monitoringService.captureError(error, "product.upsert", { businessId, productId: item.id }));
       }
     }
     onToast(draft.mode === "create" ? "Agregado al catálogo" : "Cambios guardados");
@@ -222,37 +239,32 @@ export function CatalogManager({
     }
     const cat: CatalogCategory = { id: uid("cat-grp"), name };
     persist({ categories: [...categories, cat] });
+    if (businessId) {
+      void databaseService
+        .upsertCategory(businessId, cat)
+        .catch((error) => monitoringService.captureError(error, "category.upsert", { businessId, categoryId: cat.id }));
+    }
     if (draft) setDraft({ ...draft, categoryId: cat.id });
     setNewCatName("");
     setCatModalOpen(false);
     onToast("Categoría creada");
   };
 
-  // ── Importar / exportar CSV ──────────────────────────────────────────────────
-  const exportCsv = () => {
-    const header = ["tipo", "nombre", "categoria", "costo", "tipo_costo", "precio_venta", "duracion_min"];
-    const esc = (v: string | number) => {
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const lines = rows.map((r) => [
-      r.itemType === "service" ? "servicio" : "producto",
-      r.name,
-      categoryName(r.categoryId),
-      r.cost,
-      COST_LABEL[r.costType],
-      r.salePrice,
-      r.duration ?? ""
-    ].map(esc).join(","));
-    const csv = [header.join(","), ...lines].join("\n");
-    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `catalogo-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    onToast("Catálogo exportado");
+  // ── Importar CSV / exportar Excel ────────────────────────────────────────────
+  const exportExcel = () => {
+    downloadExcel(`catalogo-${new Date().toISOString().slice(0, 10)}`, "Catálogo", visibleRows.map((r) => ({
+      Tipo: r.itemType === "service" ? "Servicio" : "Producto",
+      Nombre: r.name,
+      Categoría: categoryName(r.categoryId),
+      Costo: r.cost,
+      "Tipo de costo": COST_LABEL[r.costType],
+      "Precio de venta": r.salePrice,
+      Margen: r.salePrice - r.cost,
+      "Duración min": r.duration ?? "",
+      Stock: r.stock ?? "",
+      "Stock bajo": r.lowStock ?? ""
+    })));
+    onToast("Exportación descargada");
   };
 
   const parseCsvLine = (line: string): string[] => {
@@ -316,6 +328,28 @@ export function CatalogManager({
         services: [...services, ...newServices],
         products: [...products, ...newProducts]
       });
+      // #2: persistir el lote importado por fila. SECUENCIAL: categorías primero
+      // (los productos las referencian por FK) y luego servicios/productos.
+      if (businessId) {
+        const newCats = nextCategories.filter((c) => !categories.some((prev) => prev.id === c.id));
+        void (async () => {
+          for (const cat of newCats) {
+            await databaseService
+              .upsertCategory(businessId, cat)
+              .catch((error) => monitoringService.captureError(error, "category.upsert", { businessId, categoryId: cat.id }));
+          }
+          for (const item of newServices) {
+            await databaseService
+              .upsertService(businessId, item)
+              .catch((error) => monitoringService.captureError(error, "service.upsert", { businessId, serviceId: item.id }));
+          }
+          for (const item of newProducts) {
+            await databaseService
+              .upsertProduct(businessId, item)
+              .catch((error) => monitoringService.captureError(error, "product.upsert", { businessId, productId: item.id }));
+          }
+        })();
+      }
       onToast(`Importados ${newServices.length + newProducts.length} ítems`);
     } catch {
       onToast("No se pudo leer el archivo CSV");
@@ -353,7 +387,7 @@ export function CatalogManager({
           <button className="j-btn" onClick={() => fileRef.current?.click()}>
             <Upload size={13} strokeWidth={2.25} /> Importar
           </button>
-          <button className="j-btn" onClick={exportCsv} disabled={rows.length === 0}>
+          <button className="j-btn" onClick={exportExcel} disabled={visibleRows.length === 0}>
             <Download size={13} strokeWidth={2.25} /> Exportar
           </button>
           <button className="j-btn j-btn-primary" onClick={startCreate}>
@@ -412,6 +446,7 @@ export function CatalogManager({
                 <th className="num">
                   <button className="j-th-sort" onClick={() => toggleSort("margin")}>Margen <ArrowUpDown size={11} /></button>
                 </th>
+                <th className="num">Stock</th>
                 <th />
               </tr>
             </thead>
@@ -419,6 +454,9 @@ export function CatalogManager({
               {/* P4: filas de solo lectura; clic abre la ventana de detalle. */}
               {visibleRows.map((r) => {
                 const margin = r.salePrice - r.cost;
+                const stockVal = r.stock ?? 0;
+                const lowStock = r.itemType === "product"
+                  && (stockVal === 0 || (r.lowStock != null && stockVal <= r.lowStock));
                 return (
                   <tr key={r.id} className="click" onClick={() => startEdit(r)} style={{ cursor: "pointer" }}>
                     <td>
@@ -439,6 +477,15 @@ export function CatalogManager({
                     <td className="num mono">{formatCurrency(r.salePrice, currency)}</td>
                     <td className="num mono" style={{ color: margin >= 0 ? "var(--fg)" : "var(--neg)" }}>
                       {formatCurrency(margin, currency)}
+                    </td>
+                    <td className="num mono">
+                      {r.itemType === "product" ? (
+                        <span style={{ color: lowStock ? "var(--neg)" : "var(--fg)", fontWeight: lowStock ? 700 : 400 }}>
+                          {stockVal}{lowStock ? " ⚠" : ""}
+                        </span>
+                      ) : (
+                        <span style={{ color: "var(--fg-subtle)" }}>—</span>
+                      )}
                     </td>
                     <td className="num"><ChevronRight size={15} style={{ color: "var(--fg-muted)" }} /></td>
                   </tr>
@@ -517,6 +564,20 @@ export function CatalogManager({
                   </div>
                 )}
               </div>
+
+              {/* Inventario (solo productos): existencias + aviso de stock bajo. */}
+              {draft.itemType === "product" && (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 14 }}>
+                  <div className="j-field">
+                    <div className="j-field-label">Existencias</div>
+                    <input className="j-input mono" type="number" min="0" step="1" value={draft.stock} onChange={(e) => setDraft({ ...draft, stock: e.target.value })} placeholder="0" />
+                  </div>
+                  <div className="j-field">
+                    <div className="j-field-label">Avisar si baja de</div>
+                    <input className="j-input mono" type="number" min="0" step="1" value={draft.lowStock} onChange={(e) => setDraft({ ...draft, lowStock: e.target.value })} placeholder="Opcional" />
+                  </div>
+                </div>
+              )}
 
               <div style={{ marginTop: 14, fontSize: 12.5, color: "var(--fg-muted)" }}>
                 Margen estimado: <span className="mono" style={{ color: draftMargin >= 0 ? "var(--fg)" : "var(--neg)", fontWeight: 600 }}>{formatCurrency(draftMargin, currency)}</span>

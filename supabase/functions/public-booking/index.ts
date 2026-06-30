@@ -297,6 +297,32 @@ serve(async (req: Request) => {
       return json(409, { error: "Ese horario acaba de ocuparse" });
     }
 
+    // ── 7b. Doble booking contra la TABLA normalizada (#1) ────────────────────
+    // Las citas que el dashboard/empleado escriben directo a business_appointments
+    // pueden NO estar en el app_state (que es espejo best-effort). Verificamos también
+    // contra la tabla (fuente de verdad) para no sobre-agendar. Tolerante: si la tabla
+    // no existe, se omite y queda la verificación por app_state de arriba.
+    try {
+      const { data: rows, error: rowsErr } = await supabase
+        .from("business_appointments")
+        .select("time, duration_minutes, status")
+        .eq("business_id", businessId)
+        .eq("employee_id", employeeId)
+        .eq("date", date)
+        .is("deleted_at", null)
+        .neq("status", "cancelled");
+      if (!rowsErr && Array.isArray(rows)) {
+        const tableConflict = rows.some((r) =>
+          appointmentOverlaps(time, service.duration, String(r.time).slice(0, 5), Number(r.duration_minutes ?? 60))
+        );
+        if (tableConflict) {
+          return json(409, { error: "Ese horario acaba de ocuparse" });
+        }
+      }
+    } catch (_overlapErr) {
+      // best-effort: si la consulta falla, queda la verificación por app_state.
+    }
+
     // ── 8. Construcción del registro CON AUTORIDAD DEL SERVIDOR ────────────────
     // Se ignora todo lo que el cliente mande para campos sensibles: ids, precio,
     // duración, depósito, estado, pago y createdAt los fija el backend.

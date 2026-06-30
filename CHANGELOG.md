@@ -4,6 +4,227 @@ Todas las notas relevantes de cambios del sistema. Las versiones siguen un esque
 informal por "olas" de prioridades (P1–P11). El formato se inspira en
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [Sin versión] — Estabilidad para venta: ventas por fila, onboarding, legales, E2E (2026-06-12)
+
+### Added
+
+- **Tabla `business_sales`** (`supabase/sales.sql`, incluida en `setup_full.sql`) con
+  RLS por negocio: cualquier perfil activo del negocio —incluido el rol `employee`—
+  puede registrar ventas. Resuelve el bug por el que un empleado vendiendo no podía
+  guardar (la venta intentaba reescribir el JSON completo de `businesses`, que su RLS
+  no permite). La venta ahora se **inserta por fila** y el stock se actualiza por
+  producto (`databaseService.insertSale` / `updateProductStock`).
+- **Onboarding ahora es un wizard de configuración inicial completa** (`features/onboarding/OnboardingScreen.tsx`):
+  negocio → horarios → servicios/precios → empleados → proveedores → catálogo. Negocio,
+  horarios y al menos un servicio con precio son obligatorios; empleados, proveedores y
+  catálogo son omitibles. Si el admin cierra antes de terminar, el onboarding vuelve a
+  aparecer al iniciar sesión porque `onboardingCompleted` no se marca hasta finalizar.
+- **Páginas legales públicas**: `/terminos` y `/privacidad` (`pages/LegalPage.tsx`,
+  rutas en `lib/routing.ts`), con texto base para SaaS en México (campos `[entre
+  corchetes]` por completar y revisar con abogado). Enlazadas desde el footer del
+  login y del sitio público de reservas.
+- **Tests E2E con Playwright** (`e2e/`, `playwright.config.ts`): 4 smoke sin
+  credenciales (login monta, páginas legales cargan) + 3 flujos autenticados que se
+  saltan solos si no hay `JACK_E2E_EMAIL`/`JACK_E2E_PASSWORD`. Scripts
+  `npm run test:e2e` y `test:e2e:ui`.
+
+### Changed
+
+- **Catálogo, proveedores y corte de caja escriben por fila** (#2): dejaron de
+  reescribir `app_state` completo (`saveBusinessState`) y ahora hacen upsert por
+  entidad (`upsertService`/`upsertProduct`/`upsertCategory`/`upsertSupplier`/
+  `upsertCashCut`), con `app_state` como espejo best-effort. Esto elimina el riesgo
+  de race entre dos usuarios guardando a la vez en esas secciones y permite que el
+  rol con RLS limitada guarde. Solo `Configuración` sigue escribiendo `app_state`
+  completo (config ligera, por diseño).
+- **El dashboard incluye las ventas de productos** (#3) en Ingresos de hoy/semana/mes,
+  el cambio mensual % y la gráfica de 7 días, con desglose visible. Antes solo sumaba
+  citas, así que el corte de caja podía mostrar más ingresos que el dashboard.
+
+### Fixed
+
+- El loader normalizado ahora trae `business_sales`: las ventas sobreviven a la
+  recarga (antes solo vivían en `app_state` y se perdían de la UI).
+
+## [Sin versión] — División de App.tsx: vistas grandes a features/ (2026-06-10)
+
+### Changed
+
+- **`App.tsx` bajó de ~2,630 a ~1,336 líneas** al extraer las vistas grandes,
+  todas con carga diferida (`React.lazy` + `Suspense`):
+  - `LoginScreen` → `src/features/auth/LoginScreen.tsx`
+  - `Dashboard` + `WeeklyView` → `src/features/dashboard/Dashboard.tsx`
+  - `CalendarView` → `src/features/calendar/CalendarView.tsx`
+  - `AppointmentDetailModal` → `src/features/appointments/AppointmentDetailModal.tsx`
+  - `NewAppointmentFullScreen` → `src/features/appointments/NewAppointmentFullScreen.tsx`
+  - Helpers compartidos (`appointmentStatusLabel`, `appointmentStatusChoices`,
+    `PAY_METHOD_LABELS`) → `src/lib/appointmentUi.ts`
+- **El chunk JS principal bajó de 504 kB a 472 kB** (gzip 136 kB) y desapareció de
+  nuevo la advertencia de Vite. Cada vista se descarga solo cuando se usa.
+- Sin cambios visuales ni funcionales: mismos props, mismos componentes.
+- Los tests estáticos que validaban strings dentro de `App.tsx` se actualizaron a
+  las rutas nuevas (mismas protecciones de producto, otro archivo).
+
+### Fixed
+
+- `ProductSalesView` pasaba una prop `sub` inexistente a `JEmpty` (era
+  `description`); lo detectó `tsc --noEmit` al verificar el refactor.
+
+## [Sin versión] — Calendario: preview en celdas y cita desde el día (2026-06-10)
+
+### Added
+
+- **Mini-preview en las celdas del mes** (escritorio): hasta 2 citas con hora,
+  punto de estado y primer nombre del cliente, más "+N más" si hay más. En
+  pantallas chicas se conserva el conteo compacto de antes (CSS responsivo).
+- **Botón "Nueva cita" en el panel del día**: crea una cita con la fecha del día
+  seleccionado precargada (antes había que ir a la acción del topbar y cambiar
+  la fecha a mano).
+- Test estático del lote.
+
+### Fixed
+
+- La leyenda del calendario solo decía Confirmada/Pendiente aunque el punto
+  también puede ser rojo por cancelada; se agregó **Cancelada**.
+
+## [Sin versión] — Estadísticas v2: ventas integradas y comparativa visual (2026-06-10)
+
+### Added
+
+- **Toggle Línea / Barras** en la tendencia de ingresos (la vista de línea ayuda
+  sobre todo en el mes, donde 31 barras eran ruido).
+- **Comparativa visual**: cada punto de la gráfica trae el valor del periodo
+  anterior como línea punteada gris (semana vs semana anterior, mes vs mes
+  anterior por día equivalente, año vs año anterior por mes).
+- **Top de productos** del periodo (piezas, ingresos y margen por producto),
+  junto al top de servicios.
+- Test estático que protege ventas integradas, toggle y formato de moneda.
+
+### Changed
+
+- **Las ventas de productos entran a Estadísticas**: ingresos del periodo, margen
+  estimado (costo de producto del catálogo), serie de tendencia, ranking de
+  empleados (ventas asignadas) y exportación Excel. El KPI de ingresos desglosa
+  Servicios · Productos.
+- La gráfica formatea moneda en eje y tooltip con los helpers centralizados
+  (`formatCurrency` / `formatCurrencyShort`); antes mostraba números crudos.
+- "Ingresos por empleado" pasó a tarjeta de ancho completo; el grid de dos
+  columnas ahora es Top servicios | Top productos.
+- El dashboard también pasa la divisa del negocio a su gráfica.
+
+### Fixed
+
+- El KPI de cambio ya no muestra un "+100%" engañoso cuando el periodo anterior
+  fue $0: ahora dice "Nuevo — sin periodo anterior" o "Sin movimientos".
+
+## [Sin versión] — Corte de caja v2: conteo verificado por método (2026-06-10)
+
+### Added
+
+- **Método de pago por cita**: al marcar una cita como "Pagado" ahora se elige con
+  qué pagó el cliente (efectivo / t. crédito / t. débito / transferencia, mismas
+  opciones que Ventas). Un tap extra; nada se marca hasta elegir método. El método
+  se muestra como etiqueta en el detalle y se puede corregir después.
+- Columna `business_appointments.payment_method` + foto del esperado por método en
+  `business_cash_cuts` (`supabase/cash_cut_v2.sql`, incluido en `setup_full.sql`).
+  El frontend es tolerante si la BD aún no corre el SQL (reintenta sin las columnas).
+- **Historial de cortes clickeable**: cada corte abre una ventana centrada con la
+  foto completa (esperado/contado/diferencia por método, ventas de productos,
+  retiro, efectivo restante, notas) y se elimina desde ahí con confirmación en dos
+  pasos (se quitó el diálogo nativo del navegador).
+- Test estático nuevo que protege el conteo por método, la integración de ventas y
+  el selector de método al cobrar.
+
+### Changed
+
+- **El corte dejó de ser una captura a ciegas**: ahora muestra una fila por método
+  con `Esperado | Contado | Diferencia` en vivo. El esperado lo calcula el sistema
+  (citas pagadas con método + ventas de productos del día); el usuario solo teclea
+  lo que contó. Los cobros pagados sin método registrado (citas previas a v2)
+  aparecen como fila aparte con indicación de cómo corregirlos.
+- **Las ventas de productos ya entran al corte**: el "Total esperado" suma citas
+  pagadas + ventas del día, y el "Detalle del día" lista ambas (antes el corte
+  ignoraba las ventas y reportaba sobrantes falsos).
+- El resumen del día del corte ahora desglosa "Citas pagadas" y "Ventas de
+  productos" como KPIs separados.
+
+### Fixed
+
+- El loader normalizado (`loadNormalizedState`) omitía `sales` al armar el estado:
+  las ventas registradas desaparecían de la UI al recargar la página (seguían en
+  `app_state`, pero no se mostraban). Ahora se preservan.
+
+### Pendiente
+
+- El chunk JS principal volvió a cruzar apenas el umbral de Vite (504 kB vs 500):
+  es crecimiento acumulado de `App.tsx`; se resuelve extrayendo las vistas grandes
+  restantes (fase futura ya documentada en CLAUDE.md).
+
+## [Sin versión] — Exportación Excel en todos los apartados (2026-06-07)
+
+### Added
+
+- Nueva utilidad compartida `src/lib/excelExport.ts` para descargar archivos `.xlsx`
+  reales compatibles con Excel desde el navegador, sin dependencia externa pesada.
+- Los `.xlsx` incluyen formato visual: encabezado con contraste, bordes, ancho de
+  columnas calculado por contenido, números alineados, primera fila congelada y filtro
+  automático.
+- Exportación Excel en:
+  - Dashboard
+  - Calendario
+  - Citas
+  - Reservaciones web
+  - Empleados / rendimiento
+  - Productos y servicios
+  - Proveedores
+  - Corte de caja e historial
+  - Estadísticas
+  - Configuración
+
+### Changed
+
+- Los botones de exportación principales dejan de generar CSV y ahora descargan `.xlsx`.
+- Los botones visibles dicen **Exportar** para no amarrar la acción a una app específica.
+- La importación CSV del catálogo se conserva, porque sigue siendo útil para cargar
+  productos/servicios masivamente.
+
+## [Sin versión] — Citas: filtros persistentes y aceptar reservas web (2026-06-04)
+
+### Changed
+
+- Los filtros de la sección **Citas** ahora se guardan en `localStorage` por negocio
+  y usuario (`businessId + userId`). Si un admin o empleado deja el listado en
+  `Pendiente`, cambia de sección y regresa, conserva esa configuración.
+- También se guarda la pestaña activa de Citas (`Citas` / `Reservaciones web`) por
+  usuario.
+- La pestaña **Reservaciones web** funciona como bandeja de solicitudes web pendientes
+  por aceptar (`source: public_site`, `status: pending`).
+- Al aceptar una solicitud web, se convierte en cita formal: `source: dashboard` y
+  `status: pending`. Por eso aparece en el listado normal de **Citas** cuando el filtro
+  está en `Pendiente`.
+- El contador en la pestaña muestra solo solicitudes web pendientes por aceptar.
+
+## [Sin versión] — Nueva cita: fecha amplia y teléfono opcional seguro (2026-06-04)
+
+Corrección UX/datos en el flujo de creación de citas.
+
+### Changed
+
+- `NewAppointmentFullScreen` ahora muestra una selección de fecha más grande, con
+  preview legible y accesos rápidos: Hoy, Mañana, En 2 días, En 3 días y Próxima semana.
+- El campo de teléfono al crear cliente dentro de Nueva cita ahora está etiquetado como
+  **Teléfono / WhatsApp (opcional)** y explica que si queda vacío se guarda sin teléfono.
+- El botón Crear cliente se bloquea si el teléfono está incompleto. Se debe capturar un
+  número nacional de 10 dígitos o dejarlo vacío.
+- Las citas nuevas ya no arrancan con el primer cliente del negocio preseleccionado; ahora
+  empiezan sin cliente para evitar heredar datos/telefono de otra persona.
+
+### Fixed
+
+- `createClientInline` normaliza el teléfono antes de guardar. Si no hay 10 dígitos
+  nacionales completos, guarda `phone: ""` en vez de conservar valores parciales o
+  derivados.
+
 ## [Sin versión] — Consolidación setup + backfill Supabase (2026-06-03)
 
 Se cerró la migración de lectura normalizada A-E a nivel operativo.
@@ -49,6 +270,226 @@ Se cerró la migración de lectura normalizada A-E a nivel operativo.
   - citas activas sin cliente: 0
   - citas activas sin empleado: 6 (dato histórico tolerado; quedan sin asignar y
     deben reasignarse manualmente si el negocio las necesita operativas).
+
+## [Sin versión] — Productos: inventario (Lote A de "vender + inventario") (2026-06-04)
+
+Primer mini-lote de la funcionalidad de venta de productos: el **inventario**. Cada
+producto ahora tiene existencias y un aviso opcional de stock bajo. Aún NO descuenta al
+vender (eso es el Lote B). Build y tests (11/11) verdes.
+
+### SQL a correr
+
+- **`supabase/product_inventory.sql`** (nuevo, idempotente): agrega `stock` (default 0)
+  y `low_stock` a `business_products`. Correr después de `catalog_products.sql`.
+
+### Added
+
+- `ProductItem` (tipos): campos opcionales `stock` y `lowStock`.
+- `CatalogManager`: al crear/editar un **producto** aparecen los campos **Existencias** y
+  **Avisar si baja de** (umbral). La tabla del catálogo muestra una columna **Stock**;
+  los productos en cero o por debajo del umbral se resaltan en rojo con ⚠. Los servicios
+  muestran "—" (no aplican inventario).
+- `databaseService`: el espejo/normalización de productos incluye `stock` y `low_stock`.
+
+### Pendiente (Lote B)
+
+- Botón **Vender**: registra la venta (suma a ingresos y al corte de caja) y **descuenta
+  el stock** automáticamente, con avisos de stock bajo/agotado.
+
+## [Sin versión] — Rediseño UI · Pulido final (2026-06-04)
+
+Pulido fino de consistencia (la base ya estaba sólida; cambios pequeños y de buen gusto,
+solo CSS). Build y tests (11/11) verdes.
+
+### Changed (`src/styles.css`)
+
+- Títulos de tarjeta (`.j-card-head h3`): peso 650 → **700**, para que igualen el peso
+  de los demás títulos del sistema (jerarquía consistente).
+- Subtítulos de tarjeta (`.j-card-head .sub`): color un poco más legible
+  (`--fg-subtle` → `--fg-muted`) y peso 400 → 500.
+- KPIs: se quitó el **degradado decorativo** del hover y se suavizó el "levantar" de
+  -2px a -1px. Hover más calmado y simple, sin adornos.
+
+## [Sin versión] — Rediseño UI Lote 4: formularios y sitio público (2026-06-04)
+
+Cierre de los últimos restos de estilo decorativo (etiquetas `<i>` que renderizaban en
+cursiva) en formularios, login y sitio público. Build y tests (11/11) verdes.
+
+### Changed
+
+- `src/App.tsx`:
+  - Subtítulo del login: se quitó la cursiva (`<i>organizar tu agenda</i>` → texto plano).
+  - Nueva cita, paso "cliente": el encabezado "¿Para qué cliente?" dejó de usar la clase
+    decorativa + `<i>`; ahora es Inter 700, 22px, consistente con los demás encabezados.
+- `src/pages/PublicBookingSite.tsx`:
+  - Se quitaron las cursivas (`<i>`) de los títulos "Reserva confirmada", "Este sitio
+    público no está activo" y de la fecha de confirmación.
+  - La fecha y hora de confirmación ahora se resaltan con **negrita** (`<strong>`) en vez
+    de cursiva — énfasis claro y consistente.
+- Verificado: ya NO queda ninguna etiqueta `<i>`/`<em>` ni `font-style: italic` en todo
+  `src/`. El sistema completo quedó sin cursivas.
+
+### Pendiente (opcional)
+
+- Pulido fino de espaciados/jerarquía en secciones puntuales si se desea; la base de
+  consistencia (tipografía plana, sin cursiva, números sólidos) ya está aplicada en todo.
+
+## [Sin versión] — Rediseño UI Lote 3: Dashboard + cierre de cursivas (2026-06-04)
+
+El Dashboard ya estaba bastante consistente tras el Lote 1; este lote cierra los números
+"débiles" que quedaban y elimina la última cursiva del sistema. Build y tests (11/11) verdes.
+
+### Changed
+
+- `src/App.tsx` (Dashboard): el número grande de "Tasa completada" (mes) usaba la clase
+  decorativa `serif` sin peso → se veía débil. Ahora es Inter peso 700, tabular, igual de
+  sólido que los valores de los KPIs.
+- `src/App.tsx`: se quitó la **última cursiva inline** que el cambio de CSS no alcanzó
+  ("Sin datos aún" en el resumen de nueva cita). Verificado: ya NO queda ninguna
+  `font-style: italic` en todo `src/`.
+- `src/styles.css`: la clase heredada `.serif` (que ya no es serif ni cursiva) se
+  normalizó a peso 600, para que cualquier uso restante se vea consistente y legible en
+  lugar de débil. (No usar para texto nuevo.)
+
+### Pendiente (próximos lotes)
+
+- Formularios (nueva cita, configuración), tablas y el resto de secciones para terminar
+  de unificar jerarquía y espaciados.
+
+## [Sin versión] — Rediseño UI Lote 2: calendario más legible (2026-06-04)
+
+Segundo lote del rediseño. Mejoras de legibilidad y consistencia en la sección
+Calendario (vista mes + panel del día). Sin cambios de lógica/flujos. Build y tests
+(11/11) verdes.
+
+### Changed
+
+- `src/App.tsx` (CalendarView): el título del panel del día dejó de usar la clase
+  `serif` con peso 400 (se veía débil tras quitar la cursiva); ahora es Inter peso 600,
+  color sólido, consistente con el resto.
+- `src/styles.css` (calendario):
+  - Encabezados de día (Lun…Dom) más legibles (color `--fg-muted`, tamaño 11px).
+  - Número de día más marcado (15px, peso 700).
+  - Cada día con citas muestra un indicador claro: **punto de estado + número + "cita/
+    citas"** (verde = normal, ámbar = hay pendientes, rojo = hay canceladas). En móvil
+    solo el número. (Se probó mostrar la primera hora pero no gustó y se quitó.)
+  - **Altura ajustada**: se redujo respecto al original (104px) a una proporción cómoda
+    (92px desktop, 66px móvil) — compacto pero sin verse aplastado ni genérico. (Un
+    primer intento a 72px quedó demasiado aplastado y se corrigió.)
+- Orden de citas: el panel del día las muestra **ordenadas por hora** (la más temprana
+  primero = la que se hace primero); verificado. Y ahora la celda del mes también
+  muestra esa primera hora.
+
+### Pendiente (próximos lotes)
+
+- Dashboard (KPIs, tarjetas, jerarquía), formularios y el resto de secciones.
+- Vista semanal (`WeeklyView`) si se quiere alinear con el mismo lenguaje.
+
+## [Sin versión] — Rediseño UI Lote 1: tipografía plana y consistente (2026-06-04)
+
+Primer lote del rediseño "amplio por lotes". Objetivo: quitar el estilo decorativo
+(fuente serif en cursiva, "Instrument Serif") y dejar una tipografía PLANA, legible y
+consistente en todo el sistema. Solo CSS; sin cambios de estructura/flujos. Build y
+tests (11/11) verdes.
+
+### Changed (solo `src/styles.css`)
+
+- Se eliminó toda la fuente serif decorativa: cada `font-family: "Instrument Serif"…`
+  pasó a la base Inter. Se eliminó toda `font-style: italic` (→ `normal`).
+- Títulos de página: el "accent" (la palabra antes en cursiva serif) ahora es idéntico
+  al título (Inter, 30px, peso 700, color sólido) → se lee como un solo título plano.
+- Encabezados de formularios, login y estados (vacío / "próximamente") unificados a
+  Inter peso 700, color sólido, tamaños consistentes (ya no serif/cursiva débil).
+- `CLAUDE.md`: la decisión de estética se actualizó — B/W minimalista PLANO, sin
+  serif/cursiva; no reintroducir el estilo "editorial" anterior.
+
+### Pendiente (próximos lotes del rediseño)
+
+- Lote 2: calendario (vista mes/semana, legibilidad, estados, día seleccionado).
+- Lotes siguientes: dashboard, formularios, jerarquía visual y componentes por sección.
+
+## [Sin versión] — Semana consistente entre Dashboard y Estadísticas (2026-06-04)
+
+El Dashboard definía "Ingresos semana" como semana CALENDARIO lunes–domingo (igual que
+su "mes" es mes calendario), pero Estadísticas definía "Semana" como los ÚLTIMOS 7 DÍAS
+(ventana móvil) → el mismo negocio veía dos cifras distintas de la semana. Build y tests
+(11/11) verdes.
+
+### Fixed
+
+- `StatsManager.periodBounds` (`period === "week"`): ahora usa la semana calendario
+  lunes–domingo que contiene "hoy" (mismo criterio que `revenueForCurrentWeek` del
+  dashboard), y el periodo anterior es la semana lunes–domingo previa. La serie de
+  tendencia semanal hereda el rango (Lun..Dom). El mes y el año ya eran calendario y no
+  cambian.
+- Verificado que el Dashboard ya estaba correcto: `revenueForCurrentWeek` (lun–dom) y
+  `revenueForMonth` (mes calendario), ambos solo `paymentStatus === "paid"`.
+- Test de regresión: Dashboard y Estadísticas deben compartir la misma definición de
+  semana (`getDay() || 7`), sin ventana móvil.
+
+## [Sin versión] — Guardián multi-tenant (#5) + limpieza de teléfonos (2026-06-04)
+
+Dos cosas, ambas SQL-only, sin cambios de frontend. Build y tests (9/9) verdes.
+
+### Security (#5 · llaves multi-tenant)
+
+- Diagnóstico: `uid()` es aleatorio y los negocios nuevos arrancan vacíos (sin ids
+  deterministas), así que la colisión global de `id text primary key` es casi
+  imposible. El único vector real es un upsert cruzado que reasigne `business_id`.
+- **`supabase/harden_multitenant_pks.sql`** (nuevo, idempotente, NO destructivo): trigger
+  `jack_block_business_id_change` en las 8 tablas normalizadas que bloquea cualquier
+  UPDATE que cambie `business_id`. Un upsert cruzado falla en vez de corromper.
+- La migración a PK compuesta `(business_id, id)` queda como paso futuro OPCIONAL (es
+  destructiva: PK/FKs/RLS/onConflict/edge functions) y exige respaldo. El guardián
+  cubre el riesgo mientras tanto.
+
+### Fixed (teléfonos corruptos)
+
+- **`supabase/fix_corrupted_phones.sql`** (nuevo): detecta teléfonos arruinados por el
+  bug viejo de PhoneInput (dígitos > 13 o patrón `52` repetido) y los corrige con
+  heurística `52 + últimos 10 dígitos` (los dígitos reales quedaban al final). Trae
+  SELECT de revisión + UPDATE comentado (revisar antes de aplicar). El front ya genera
+  teléfonos correctos; esto limpia datos viejos en `business_clients`.
+
+## [Sin versión] — Escritura directa de citas/clientes por fila (#1) (2026-06-04)
+
+Las acciones de cita (crear/editar/estado/pago/borrar) y el alta de cliente ahora
+escriben DIRECTO a su tabla normalizada (`business_appointments` / `business_clients`)
+en vez de reescribir el `app_state` completo. Resuelve dos cosas de la auditoría:
+el rol `employee` ya puede guardar sus citas (su RLS permite `business_appointments`,
+no `businesses`), y se elimina el race del JSON monolítico para citas. El `app_state`
+queda como espejo best-effort. Build y tests (9/9) verdes. `public-booking` redeployado.
+
+### Changed
+
+- `databaseService`: nuevos `upsertAppointment`, `upsertClient` (upsert por fila,
+  omiten `deleted_at`) y `saveAppStateBestEffort` (actualiza el JSON sin romper si la
+  RLS lo bloquea, p. ej. un `employee`).
+- `App.tsx`: `saveAppointment`, `updateAppointmentStatus`, `updateAppointmentPayment`,
+  `deleteAppointment` y el alta de cliente ahora usan helpers `persistAppointmentRow` /
+  `persistClientRow` (UI optimista vía nuevo prop `applyLocal` + upsert/soft-delete
+  directo + sync best-effort de `app_state`). El resto de secciones (config, catálogo,
+  proveedores, caja, empleados) sigue usando `setBusiness`/`saveBusinessState`.
+- `public-booking`: el anti-doble-booking ahora también verifica contra
+  `business_appointments` (tabla = fuente de verdad), no solo el `app_state`, para no
+  sobre-agendar contra citas escritas directo por el dashboard/empleado. Tolerante a
+  tabla ausente.
+
+### Resuelve / mejora
+
+- **Auditoría #3 (employee pierde cambios por RLS):** resuelto para citas — el empleado
+  escribe directo a `business_appointments` (permitido por su política), ya no depende
+  de `update businesses`.
+- **Auditoría #1 (race por app_state):** las citas ya no compiten por el JSON completo
+  (upsert por fila es atómico). `app_state` sigue como espejo (best-effort) para
+  config/compat y frescura de `public-booking` cuando guarda un admin.
+
+### Riesgos / pendiente
+
+- Para un `employee`, el `app_state` queda desfasado (su `saveAppStateBestEffort` no
+  tiene permiso de UPDATE en `businesses`) — no afecta lecturas (citas/clientes vienen
+  de tablas) y `public-booking` ya checa la tabla. Otras entidades (config/catálogo/
+  proveedores/caja) siguen por `app_state` completo (solo admin las toca).
 
 ## [Sin versión] — WhatsApp solo contacta, confirmación manual (2026-06-03)
 

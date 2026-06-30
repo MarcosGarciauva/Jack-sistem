@@ -18,6 +18,8 @@ export interface BusinessSummary {
   slug: string;
   active: boolean;
   publicSiteEnabled: boolean;
+  businessType?: string;
+  createdAt?: string;
 }
 
 export interface PublicBusinessSummary {
@@ -179,6 +181,7 @@ async function loadNormalizedState(businessId: string, fallback: AppState): Prom
         employeeId: appointment.employee_id ?? "",
         status: appointment.status,
         paymentStatus: (appointment.payment_status === "paid" ? "paid" : "none") as PaymentStatus,
+        paymentMethod: appointment.payment_method ?? undefined,
         depositAmount: 0,
         paidAmount: Number(appointment.paid_amount ?? 0),
         source: appointment.source ?? "dashboard",
@@ -212,7 +215,9 @@ async function loadNormalizedState(businessId: string, fallback: AppState): Prom
           categoryId: product.category_id ?? undefined,
           cost: Number(product.cost ?? 0),
           costType: product.cost_type === "gross" ? "gross" : "net",
-          salePrice: Number(product.sale_price ?? 0)
+          salePrice: Number(product.sale_price ?? 0),
+          stock: product.stock != null ? Number(product.stock) : undefined,
+          lowStock: product.low_stock != null ? Number(product.low_stock) : undefined
         }));
       }
     }
@@ -283,11 +288,49 @@ async function loadNormalizedState(businessId: string, fallback: AppState): Prom
         expectedTotal: numOrUndef(cut.expected_total),
         difference: numOrUndef(cut.difference),
         withdrawal: numOrUndef(cut.withdrawal),
-        cashRemaining: numOrUndef(cut.cash_remaining)
+        cashRemaining: numOrUndef(cut.cash_remaining),
+        // Corte v2: esperado por método + ventas de productos (cash_cut_v2.sql)
+        expectedCash: numOrUndef(cut.expected_cash),
+        expectedCardCredit: numOrUndef(cut.expected_card_credit),
+        expectedCardDebit: numOrUndef(cut.expected_card_debit),
+        expectedTransfer: numOrUndef(cut.expected_transfer),
+        expectedUnassigned: numOrUndef(cut.expected_unassigned),
+        salesTotal: numOrUndef(cut.sales_total),
+        salesCount: numOrUndef(cut.sales_count)
       }));
     }
   } catch (cutsErr) {
     if (normalizedAvailable(cutsErr)) throw cutsErr;
+  }
+
+  // VENTAS de productos: fuente principal business_sales (insertadas por fila,
+  // incluso por empleados); fallback por entidad a app_state.sales si la tabla
+  // no existe o está vacía.
+  let sales = fallback.sales ?? [];
+  try {
+    const salesRes = await supabase
+      .from("business_sales")
+      .select("*")
+      .eq("business_id", businessId)
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false });
+    if (salesRes.error) {
+      if (normalizedAvailable(salesRes.error)) throw salesRes.error;
+    } else if ((salesRes.data?.length ?? 0) > 0) {
+      sales = (salesRes.data ?? []).map((sale) => ({
+        id: sale.id,
+        date: sale.sale_date,
+        time: sale.sale_time ?? "",
+        items: Array.isArray(sale.items) ? sale.items : [],
+        total: Number(sale.total ?? 0),
+        paymentMethod: sale.payment_method ?? "cash",
+        employeeId: sale.employee_id ?? undefined,
+        notes: sale.notes ?? undefined,
+        createdAt: sale.created_at
+      }));
+    }
+  } catch (salesErr) {
+    if (normalizedAvailable(salesErr)) throw salesErr;
   }
 
   return {
@@ -296,7 +339,8 @@ async function loadNormalizedState(businessId: string, fallback: AppState): Prom
     clients,
     appointments,
     suppliers,
-    cashCuts
+    cashCuts,
+    sales
   };
 }
 
@@ -368,7 +412,9 @@ async function mirrorNormalizedState(businessId: string, state: AppState): Promi
     name: product.name,
     cost: product.cost,
     cost_type: product.costType,
-    sale_price: product.salePrice
+    sale_price: product.salePrice,
+    stock: product.stock ?? 0,
+    low_stock: product.lowStock ?? null
   }));
   try {
     if (categories.length) {
@@ -403,7 +449,7 @@ async function mirrorNormalizedState(businessId: string, state: AppState): Promi
   // CORTE DE CAJA (#E): upsert por id (un corte por fecha; el id es estable por
   // fecha). Se guardan los campos por método/retiro. NO se manda `deleted_at` → un
   // corte borrado no resucita aunque una sesión vieja lo re-espeje.
-  const cashCuts = (state.cashCuts ?? []).map((cut) => ({
+  const cashCutBase = (cut: NonNullable<AppState["cashCuts"]>[number]) => ({
     id: cut.id,
     business_id: businessId,
     cut_date: cut.date,
@@ -424,9 +470,45 @@ async function mirrorNormalizedState(businessId: string, state: AppState): Promi
     difference: cut.difference ?? null,
     withdrawal: cut.withdrawal ?? null,
     cash_remaining: cut.cashRemaining ?? null
+  });
+  const cashCuts = (state.cashCuts ?? []).map((cut) => ({
+    ...cashCutBase(cut),
+    // Corte v2 (cash_cut_v2.sql): esperado por método + ventas de productos
+    expected_cash: cut.expectedCash ?? null,
+    expected_card_credit: cut.expectedCardCredit ?? null,
+    expected_card_debit: cut.expectedCardDebit ?? null,
+    expected_transfer: cut.expectedTransfer ?? null,
+    expected_unassigned: cut.expectedUnassigned ?? null,
+    sales_total: cut.salesTotal ?? null,
+    sales_count: cut.salesCount ?? null
   }));
   if (cashCuts.length) {
-    const r = await supabase.from("business_cash_cuts").upsert(cashCuts);
+    let r = await supabase.from("business_cash_cuts").upsert(cashCuts);
+    // Tolerancia de despliegue: si la BD aún no corre cash_cut_v2.sql, PostgREST
+    // rechaza las columnas nuevas. Reintenta con el payload base para no bloquear
+    // el guardado (la foto v2 queda solo en app_state mientras tanto).
+    if (r.error && /expected_|sales_/.test(String(r.error.message ?? ""))) {
+      r = await supabase.from("business_cash_cuts").upsert((state.cashCuts ?? []).map(cashCutBase));
+    }
+    if (r.error && normalizedAvailable(r.error)) throw r.error;
+  }
+
+  // VENTAS (#1): upsert tolerante a tabla ausente. NO se manda `deleted_at`
+  // (mismo patrón anti-resurrección que proveedores/cortes).
+  const sales = (state.sales ?? []).map((sale) => ({
+    id: sale.id,
+    business_id: businessId,
+    sale_date: sale.date,
+    sale_time: sale.time,
+    items: sale.items,
+    total: sale.total,
+    payment_method: sale.paymentMethod,
+    employee_id: sale.employeeId ?? null,
+    notes: sale.notes ?? null,
+    created_at: sale.createdAt
+  }));
+  if (sales.length) {
+    const r = await supabase.from("business_sales").upsert(sales);
     if (r.error && normalizedAvailable(r.error)) throw r.error;
   }
 }
@@ -488,6 +570,75 @@ export const databaseService = {
 
     if (error) throw error;
     await mirrorNormalizedState(businessId, state);
+  },
+
+  // ─── Escritura DIRECTA por fila para citas/clientes (#1) ────────────────────
+  // Las acciones de cita (crear/editar/estado/pago) y el alta de cliente escriben
+  // directo a su tabla normalizada (fuente de verdad), en vez de reescribir el
+  // `app_state` completo. Esto: (a) deja al rol `employee` guardar sus citas (su RLS
+  // permite business_appointments), y (b) evita el race del JSON monolítico. El
+  // `app_state` se sincroniza aparte best-effort (ver saveAppStateBestEffort).
+  async upsertAppointment(businessId: string, a: AppState["appointments"][number]): Promise<void> {
+    if (!supabase) return;
+    const row: Record<string, unknown> = {
+      id: a.id,
+      business_id: businessId,
+      client_id: a.clientId || null,
+      employee_id: a.employeeId || null,
+      service_name: a.service,
+      date: a.date,
+      time: a.time,
+      duration_minutes: a.duration,
+      price: a.price,
+      status: a.status,
+      payment_status: a.paymentStatus === "paid" ? "paid" : "none",
+      payment_method: a.paymentMethod ?? null,
+      paid_amount: a.paymentStatus === "paid" ? a.price : 0,
+      source: a.source,
+      notes: a.notes ?? null,
+      created_at: a.createdAt
+    };
+    const { error } = await supabase.from("business_appointments").upsert(row);
+    if (!error) return;
+    // Tolerancia de despliegue: si la BD aún no corre appointment_payment_method.sql,
+    // PostgREST rechaza la columna desconocida. Reintenta sin ella para no bloquear
+    // el guardado de la cita (el método queda solo en app_state mientras tanto).
+    if (String(error.message ?? "").includes("payment_method")) {
+      delete row.payment_method;
+      const retry = await supabase.from("business_appointments").upsert(row);
+      if (retry.error) throw retry.error;
+      return;
+    }
+    throw error;
+  },
+
+  async upsertClient(businessId: string, c: AppState["clients"][number]): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase.from("business_clients").upsert({
+      id: c.id,
+      business_id: businessId,
+      name: c.name,
+      phone: c.phone ?? "",
+      email: c.email ?? null,
+      notes: c.notes ?? null
+    });
+    if (error) throw error;
+  },
+
+  // Sincroniza `app_state` SIN romper si falla (p. ej. un `employee` no tiene permiso
+  // de UPDATE sobre `businesses`). Mantiene el JSON como espejo/compat y fresco para
+  // public-booking cuando lo escribe un admin. No espeja (eso ya lo hace saveBusinessState
+  // en los flujos que sí pasan por él); aquí solo escribe el JSON.
+  async saveAppStateBestEffort(businessId: string, state: AppState): Promise<void> {
+    if (!supabase) return;
+    try {
+      await supabase
+        .from("businesses")
+        .update({ app_state: state, updated_at: new Date().toISOString() })
+        .eq("id", businessId);
+    } catch {
+      // best-effort: la fuente de verdad de citas/clientes son las tablas.
+    }
   },
 
   // ─── Borrado normalizado por entidad (#2/#5) ────────────────────────────────
@@ -562,6 +713,149 @@ export const databaseService = {
     if (error && normalizedAvailable(error)) throw error;
   },
 
+  // ─── Escritura por fila (#1/#2): ventas, stock, catálogo, proveedores, corte ──
+  // Mismo patrón que upsertAppointment: la fila normalizada es la fuente de verdad
+  // y app_state se sincroniza aparte best-effort. Tolerantes a tabla ausente (la
+  // entidad queda en app_state mientras no se corra el SQL correspondiente).
+
+  // VENTAS: insert por fila — esto es lo que permite que un `employee` registre
+  // ventas (no puede escribir el JSON completo de businesses).
+  async insertSale(businessId: string, sale: NonNullable<AppState["sales"]>[number]): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase.from("business_sales").upsert({
+      id: sale.id,
+      business_id: businessId,
+      sale_date: sale.date,
+      sale_time: sale.time,
+      items: sale.items,
+      total: sale.total,
+      payment_method: sale.paymentMethod,
+      employee_id: sale.employeeId ?? null,
+      notes: sale.notes ?? null,
+      created_at: sale.createdAt
+    });
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  // STOCK: actualización puntual tras una venta (la RLS same_business de
+  // business_products permite update a cualquier miembro activo del negocio).
+  async updateProductStock(businessId: string, productId: string, stock: number): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("business_products")
+      .update({ stock, updated_at: new Date().toISOString() })
+      .eq("business_id", businessId)
+      .eq("id", productId);
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  async upsertService(businessId: string, s: AppState["config"]["services"][number]): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase.from("business_services").upsert({
+      id: s.id,
+      business_id: businessId,
+      name: s.name,
+      base_price: s.basePrice,
+      duration_minutes: s.duration,
+      deposit_required: Boolean(s.depositRequired),
+      deposit_amount: Number(s.depositAmount ?? 0)
+    });
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  async upsertCategory(businessId: string, c: { id: string; name: string }): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase.from("business_product_categories").upsert({
+      id: c.id,
+      business_id: businessId,
+      name: c.name
+    });
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  async deleteCategory(businessId: string, categoryId: string): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase
+      .from("business_product_categories")
+      .delete()
+      .eq("business_id", businessId)
+      .eq("id", categoryId);
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  async upsertProduct(businessId: string, p: NonNullable<AppState["config"]["products"]>[number]): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase.from("business_products").upsert({
+      id: p.id,
+      business_id: businessId,
+      category_id: p.categoryId || null,
+      name: p.name,
+      cost: p.cost,
+      cost_type: p.costType,
+      sale_price: p.salePrice,
+      stock: p.stock ?? 0,
+      low_stock: p.lowStock ?? null
+    });
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  async upsertSupplier(businessId: string, s: NonNullable<AppState["suppliers"]>[number]): Promise<void> {
+    if (!supabase) return;
+    const { error } = await supabase.from("business_suppliers").upsert({
+      id: s.id,
+      business_id: businessId,
+      name: s.name,
+      contact_name: s.contactName ?? null,
+      phone: s.phone ?? null,
+      email: s.email ?? null,
+      category: s.category ?? null,
+      notes: s.notes ?? null
+    });
+    if (error && normalizedAvailable(error)) throw error;
+  },
+
+  async upsertCashCut(businessId: string, cut: NonNullable<AppState["cashCuts"]>[number]): Promise<void> {
+    if (!supabase) return;
+    const base: Record<string, unknown> = {
+      id: cut.id,
+      business_id: businessId,
+      cut_date: cut.date,
+      closed_at: cut.closedAt,
+      closed_by: cut.closedBy ?? null,
+      opening_float: cut.openingFloat ?? 0,
+      total: cut.total,
+      paid_count: cut.paidCount,
+      pending_balance: cut.pendingBalance,
+      movements: cut.movements,
+      notes: cut.notes ?? null,
+      cash_amount: cut.cashAmount ?? null,
+      card_credit: cut.cardCredit ?? null,
+      card_debit: cut.cardDebit ?? null,
+      transfer: cut.transfer ?? null,
+      total_received: cut.totalReceived ?? null,
+      expected_total: cut.expectedTotal ?? null,
+      difference: cut.difference ?? null,
+      withdrawal: cut.withdrawal ?? null,
+      cash_remaining: cut.cashRemaining ?? null
+    };
+    const row = {
+      ...base,
+      expected_cash: cut.expectedCash ?? null,
+      expected_card_credit: cut.expectedCardCredit ?? null,
+      expected_card_debit: cut.expectedCardDebit ?? null,
+      expected_transfer: cut.expectedTransfer ?? null,
+      expected_unassigned: cut.expectedUnassigned ?? null,
+      sales_total: cut.salesTotal ?? null,
+      sales_count: cut.salesCount ?? null
+    };
+    let r = await supabase.from("business_cash_cuts").upsert(row);
+    // Tolerancia: BD sin cash_cut_v2.sql → reintenta sin las columnas nuevas.
+    if (r.error && /expected_|sales_/.test(String(r.error.message ?? ""))) {
+      r = await supabase.from("business_cash_cuts").upsert(base);
+    }
+    if (r.error && normalizedAvailable(r.error)) throw r.error;
+  },
+
   // ─── Cuentas: empleados (creados directamente por el administrador) ────────
 
   async listEmployeeAccounts(businessId: string): Promise<EmployeeAccount[]> {
@@ -613,7 +907,7 @@ export const databaseService = {
     if (!supabase) return [];
     const { data, error } = await supabase
       .from("businesses")
-      .select("id,name,slug,active,public_site_enabled")
+      .select("id,name,slug,business_type,active,public_site_enabled,created_at")
       .order("created_at", { ascending: false });
     if (error) throw error;
     return (data ?? []).map((row) => ({
@@ -621,8 +915,14 @@ export const databaseService = {
       name: row.name,
       slug: row.slug,
       active: row.active,
-      publicSiteEnabled: Boolean(row.public_site_enabled)
+      publicSiteEnabled: Boolean(row.public_site_enabled),
+      businessType: row.business_type ?? undefined,
+      createdAt: row.created_at ?? undefined
     }));
+  },
+
+  async deleteBusiness(businessId: string): Promise<void> {
+    await invokeAdminUser("delete_business", { businessId });
   },
 
   async createBusinessWithAdmin(input: {

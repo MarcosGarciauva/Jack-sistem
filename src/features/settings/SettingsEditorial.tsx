@@ -1,29 +1,26 @@
 // ════════════════════════════════════════════════════════════════════════════
 // Jack — Configuración del negocio (extraído de App.tsx, deuda técnica #10)
 // ════════════════════════════════════════════════════════════════════════════
-// Agrupa todas las subsecciones de Configuración: Negocio, Horario, Integraciones,
-// Sitio público, Negocios (super admin) y Plan. La navegación interna usa pestañas
-// (estado local `section`). No contiene lógica de negocio crítica: solo edita
-// `AppState.config` y el flag `public_site_enabled` vía databaseService.
+// Agrupa solo la configuración activa del producto: datos del negocio, horario,
+// reservas públicas y administración de negocios para super_admin. Se quitaron las
+// pestañas decorativas de integraciones, notificaciones y plan/facturación.
 // ════════════════════════════════════════════════════════════════════════════
 
 import { useEffect, useState } from "react";
-import { Check, Settings } from "lucide-react";
+import { Check, Download } from "lucide-react";
 import { SettingsBusinessesAdmin } from "../admin/SettingsBusinessesAdmin";
+import { downloadExcel } from "../../lib/excelExport";
 import { databaseService } from "../../services/databaseService";
 import { supabase } from "../../services/supabaseClient";
 import type { AppSession, AppState } from "../../types";
 
-type SettingsKey = "business" | "hours" | "integrations" | "public-site" | "businesses" | "notifications" | "plan";
+type SettingsKey = "business" | "hours" | "public-site" | "businesses";
 
 const SETTINGS_NAV_BASE: { id: SettingsKey; label: string; superAdminOnly?: boolean }[] = [
-  { id: "business",      label: "Negocio" },
-  { id: "hours",         label: "Horario de atención" },
-  { id: "integrations",  label: "Integraciones" },
-  { id: "public-site",   label: "Sitio público" },
-  { id: "businesses",    label: "Negocios", superAdminOnly: true },
-  { id: "notifications", label: "Notificaciones" },
-  { id: "plan",          label: "Plan & facturación" }
+  { id: "business",    label: "Negocio" },
+  { id: "hours",       label: "Horario de atención" },
+  { id: "public-site", label: "Reservas públicas" },
+  { id: "businesses",  label: "Negocios", superAdminOnly: true }
 ];
 
 export function SettingsEditorial({
@@ -42,6 +39,48 @@ export function SettingsEditorial({
   const [section, setSection] = useState<SettingsKey>("business");
   const isSuperAdmin = session.role === "super_admin";
   const nav = SETTINGS_NAV_BASE.filter((s) => !s.superAdminOnly || isSuperAdmin);
+  const exportExcel = () => {
+    const config = state.config;
+    downloadExcel("configuracion-jack", "Configuración Jack", [
+      { Sección: "Negocio", Campo: "Nombre", Valor: config.businessName },
+      { Sección: "Negocio", Campo: "Tipo", Valor: config.businessType },
+      { Sección: "Negocio", Campo: "Moneda", Valor: config.currency },
+      { Sección: "Negocio", Campo: "Dirección", Valor: config.address },
+      { Sección: "Negocio", Campo: "Teléfono", Valor: config.phone },
+      { Sección: "Negocio", Campo: "WhatsApp", Valor: config.whatsapp },
+      { Sección: "Negocio", Campo: "Instagram", Valor: config.instagram },
+      { Sección: "Reservas públicas", Campo: "Slug", Valor: config.publicSlug },
+      { Sección: "Reservas públicas", Campo: "Título", Valor: config.websiteHeadline },
+      { Sección: "Reservas públicas", Campo: "Descripción", Valor: config.websiteDescription },
+      ...config.businessHours.map((hour) => ({
+        Sección: "Horario",
+        Campo: `Día ${hour.day}`,
+        Valor: hour.enabled ? `${hour.open} - ${hour.close}` : "Cerrado"
+      })),
+      ...(config.services ?? []).map((service) => ({
+        Sección: "Servicio",
+        Campo: service.name,
+        Valor: service.basePrice,
+        Duración: service.duration,
+        Depósito: service.depositAmount
+      })),
+      ...(config.products ?? []).map((product) => ({
+        Sección: "Producto",
+        Campo: product.name,
+        Valor: product.salePrice,
+        Costo: product.cost,
+        Stock: product.stock ?? ""
+      })),
+      ...(state.suppliers ?? []).map((supplier) => ({
+        Sección: "Proveedor",
+        Campo: supplier.name,
+        Valor: supplier.phone ?? "",
+        Contacto: supplier.contactName ?? "",
+        Correo: supplier.email ?? ""
+      }))
+    ]);
+    onToast("Exportación descargada");
+  };
 
   return (
     <div className="j-settings">
@@ -63,15 +102,15 @@ export function SettingsEditorial({
       </nav>
 
       <div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          <button className="j-btn j-btn-sm" onClick={exportExcel}>
+            <Download size={12} /> Exportar
+          </button>
+        </div>
         {section === "business" && <SettingsBusiness state={state} setState={setState} onToast={onToast} />}
         {section === "hours" && <SettingsHours state={state} setState={setState} onToast={onToast} />}
-        {section === "integrations" && <SettingsIntegrations />}
         {section === "public-site" && <SettingsPublicSite businessId={businessId} isSuperAdmin={isSuperAdmin} onToast={onToast} />}
         {section === "businesses" && isSuperAdmin && <SettingsBusinessesAdmin onToast={onToast} />}
-        {section === "plan" && <SettingsPlan />}
-        {!["business","hours","integrations","public-site","businesses","plan"].includes(section) && (
-          <SettingsSoon label={SETTINGS_NAV_BASE.find((s) => s.id === section)?.label ?? ""} />
-        )}
       </div>
     </div>
   );
@@ -116,7 +155,7 @@ function SettingsPublicSite({
     try {
       await databaseService.setBusinessPublicSiteEnabled(businessId, !enabled);
       setEnabled(!enabled);
-      onToast(!enabled ? "Sitio público activado" : "Sitio público desactivado");
+      onToast(!enabled ? "Reservas públicas activadas" : "Reservas públicas desactivadas");
     } catch (err) {
       onToast("No se pudo actualizar");
     } finally {
@@ -129,11 +168,11 @@ function SettingsPublicSite({
   return (
     <>
       <div className="j-page-title" style={{ marginBottom: 6 }}>
-        <h1 style={{ fontSize: 22 }}>Sitio público</h1>
-        <span className="accent" style={{ fontSize: 22 }}>paquete add-on</span>
+        <h1 style={{ fontSize: 22 }}>Reservas públicas</h1>
+        <span className="accent" style={{ fontSize: 22 }}>agenda conectada</span>
       </div>
       <p style={{ color: "var(--fg-muted)", fontSize: 13, margin: "0 0 22px", maxWidth: 620 }}>
-        Permite a tus clientes reservar citas desde un sitio web público (paquete que se vende aparte del sistema). Las reservas llegan al dashboard automáticamente con el origen <span className="mono">public_site</span>.
+        Permite a tus clientes reservar citas desde una página pública de agenda. No es una web personalizada completa: es el formulario conectado para que las solicitudes lleguen a Citas como reservaciones web.
       </p>
 
       {loading ? (
@@ -153,7 +192,7 @@ function SettingsPublicSite({
                 <div style={{ fontSize: 12, color: "var(--fg-muted)", marginTop: 6 }}>
                   {isSuperAdmin
                     ? "Como super admin, puedes activar/desactivar este paquete para el negocio."
-                    : "El paquete de sitio público se vende aparte. Contacta a Jack para activarlo."}
+                    : "Las reservas públicas se activan desde el panel superadmin."}
                 </div>
               </div>
               {isSuperAdmin && (
@@ -187,7 +226,7 @@ function SettingsPublicSite({
                 </a>
               </div>
               <div style={{ marginTop: 16, padding: "12px 14px", background: "var(--bg-sunken)", border: "1px dashed var(--border-strong)", borderRadius: 7, fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.55 }}>
-                Comparte este enlace en tus redes, Google Business o WhatsApp. Las reservas se sincronizan en tiempo real al dashboard.
+                Comparte este enlace en redes, Google Business o WhatsApp. Las solicitudes llegan al dashboard para que el negocio las revise y atienda.
               </div>
             </div>
           )}
@@ -220,7 +259,7 @@ function SettingsBusiness({
         <span className="accent" style={{ fontSize: 22 }}>en Jack</span>
       </div>
       <p style={{ color: "var(--fg-muted)", fontSize: 13, margin: "0 0 22px", maxWidth: 620 }}>
-        La información que tus clientes ven al agendar. Estos datos también se usan en facturación.
+        La información básica del negocio. Estos datos se usan en la agenda pública y en la operación diaria.
       </p>
 
       <div className="j-card" style={{ padding: 22, display: "grid", gap: 16, maxWidth: 720 }}>
@@ -392,94 +431,6 @@ function SettingsHours({
             <Check size={13} strokeWidth={2.25} /> Guardar horario
           </button>
         </div>
-      </div>
-    </>
-  );
-}
-
-function SettingsIntegrations() {
-  const items = [
-    { name: "WhatsApp manual", desc: "Botones que abren WhatsApp Web o la app con el número del cliente. No requiere Twilio ni Meta.", on: true },
-    { name: "Google Calendar", desc: "Sincronización futura para bloquear disponibilidad externa y evitar doble agenda.", on: false }
-  ];
-  return (
-    <>
-      <div className="j-page-title" style={{ marginBottom: 6 }}>
-        <h1 style={{ fontSize: 22 }}>Integraciones</h1>
-      </div>
-      <p style={{ color: "var(--fg-muted)", fontSize: 13, margin: "0 0 22px", maxWidth: 620 }}>
-        Jack usa WhatsApp manual con enlaces wa.me para que el negocio confirme, reagende o cancele sin configurar APIs externas.
-      </p>
-      {items.map((it, i) => (
-        <div key={i} style={{ padding: "14px 18px", border: "1px solid var(--border)", borderRadius: 8, marginBottom: 10, display: "flex", gap: 14, alignItems: "center", background: "var(--bg-elev)" }}>
-          <div style={{ width: 36, height: 36, borderRadius: 7, background: "var(--bg-sunken)", display: "grid", placeItems: "center", border: "1px solid var(--border)", color: "var(--fg)" }}>
-            <Settings size={16} />
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 500, fontSize: 13.5, color: "var(--fg)" }}>
-              {it.name}
-              {it.on && <span className="j-tag dot pos" style={{ marginLeft: 8 }}>Conectado</span>}
-              {!it.on && <span className="j-tag" style={{ marginLeft: 8 }}>Próximamente</span>}
-            </div>
-            <div style={{ fontSize: 12.5, marginTop: 2, color: "var(--fg-muted)" }}>{it.desc}</div>
-          </div>
-          <button className="j-btn j-btn-sm" disabled={!it.on}>
-            {it.on ? "Configurar" : "Conectar"}
-          </button>
-        </div>
-      ))}
-    </>
-  );
-}
-
-function SettingsPlan() {
-  return (
-    <>
-      <div className="j-page-title" style={{ marginBottom: 6 }}>
-        <h1 style={{ fontSize: 22 }}>Plan & facturación</h1>
-        <span className="accent" style={{ fontSize: 22 }}>Jack</span>
-      </div>
-      <p style={{ color: "var(--fg-muted)", fontSize: 13, margin: "0 0 22px", maxWidth: 680 }}>
-        Espacio comercial para mostrar al negocio qué tiene contratado y qué falta activar.
-      </p>
-      <div className="j-kpis">
-        <div className="j-kpi">
-          <div className="j-kpi-label">Sistema Jack</div>
-          <div className="j-kpi-value mono">$200</div>
-          <div className="j-kpi-delta"><span>Mensualidad base MXN</span></div>
-        </div>
-        <div className="j-kpi">
-          <div className="j-kpi-label">Sitio conectado</div>
-          <div className="j-kpi-value mono">Add-on</div>
-          <div className="j-kpi-delta"><span>Paquete web + reservas</span></div>
-        </div>
-        <div className="j-kpi">
-          <div className="j-kpi-label">WhatsApp</div>
-          <div className="j-kpi-value mono">Manual</div>
-          <div className="j-kpi-delta"><span>Abre wa.me sin APIs externas</span></div>
-        </div>
-      </div>
-      <div className="j-card" style={{ padding: 22, maxWidth: 760 }}>
-        <div className="j-field-label" style={{ marginBottom: 10 }}>Notas de facturación</div>
-        <div style={{ display: "grid", gap: 10, fontSize: 13, color: "var(--fg-muted)", lineHeight: 1.55 }}>
-          <div><b style={{ color: "var(--fg)" }}>Instalación sistema:</b> sugerido $4,000 MXN.</div>
-          <div><b style={{ color: "var(--fg)" }}>Sitio informativo:</b> sugerido $2,000 MXN.</div>
-          <div><b style={{ color: "var(--fg)" }}>Paquete completo:</b> sugerido $5,000 MXN + $200 MXN mensuales.</div>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function SettingsSoon({ label }: { label: string }) {
-  return (
-    <>
-      <div className="j-page-title" style={{ marginBottom: 6 }}>
-        <h1 style={{ fontSize: 22 }}>{label}</h1>
-      </div>
-      <div className="j-soon">
-        <div className="title">Próximamente</div>
-        <p>Esta sección está en construcción. Por ahora puedes configurar <b style={{ color: "var(--fg)" }}>Negocio</b>, <b style={{ color: "var(--fg)" }}>Servicios</b> e <b style={{ color: "var(--fg)" }}>Integraciones</b>.</p>
       </div>
     </>
   );

@@ -1,41 +1,37 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import {
-  AlertCircle,
   BarChart3,
   BriefcaseBusiness,
   CalendarDays,
-  Check,
   ChevronRight,
-  ChevronLeft,
-  CircleDollarSign,
   Clock,
   CreditCard,
   Download,
   LayoutDashboard,
   LogOut,
-  MessageCircle,
   Package,
-  Pencil,
   Plus,
   Search,
   Settings,
-  Sparkles,
-  Trash2,
-  Truck,
-  X
+  Truck
 } from "lucide-react";
 import { PaymentBadge, StatusBadge } from "./components/Badge";
 import { JShellSkeleton, JEmpty } from "./components/Editorial";
 import { SettingsBusinessesAdmin } from "./features/admin/SettingsBusinessesAdmin";
 import { OnboardingScreen } from "./features/onboarding/OnboardingScreen";
-import { PhoneInput, formatPhoneDisplay } from "./components/PhoneInput";
+import { parsePhone } from "./components/PhoneInput";
 
 // ── Code-splitting (#10) ──────────────────────────────────────────────────────
 // Componentes pesados o ligados a una sola sección/ruta se cargan bajo demanda con
 // React.lazy para sacarlos del chunk inicial (recharts, sitio público, managers de
 // secciones secundarias). Cada uso se envuelve en <Suspense> con un fallback ligero.
-const RevenueChart = lazy(() => import("./components/Charts").then((m) => ({ default: m.RevenueChart })));
 const PublicBookingSite = lazy(() => import("./pages/PublicBookingSite").then((m) => ({ default: m.PublicBookingSite })));
+const LegalPage = lazy(() => import("./pages/LegalPage").then((m) => ({ default: m.LegalPage })));
+const LoginScreen = lazy(() => import("./features/auth/LoginScreen").then((m) => ({ default: m.LoginScreen })));
+const Dashboard = lazy(() => import("./features/dashboard/Dashboard").then((m) => ({ default: m.Dashboard })));
+const CalendarView = lazy(() => import("./features/calendar/CalendarView").then((m) => ({ default: m.CalendarView })));
+const AppointmentDetailModal = lazy(() => import("./features/appointments/AppointmentDetailModal").then((m) => ({ default: m.AppointmentDetailModal })));
+const NewAppointmentFullScreen = lazy(() => import("./features/appointments/NewAppointmentFullScreen").then((m) => ({ default: m.NewAppointmentFullScreen })));
 const EmployeesManager = lazy(() => import("./features/employees/EmployeesManager").then((m) => ({ default: m.EmployeesManager })));
 const CatalogManager = lazy(() => import("./features/catalog/CatalogManager").then((m) => ({ default: m.CatalogManager })));
 const CashManager = lazy(() => import("./features/cash/CashManager").then((m) => ({ default: m.CashManager })));
@@ -44,16 +40,20 @@ const WebReservationsView = lazy(() => import("./features/reservations/WebReserv
 const SuppliersManager = lazy(() => import("./features/suppliers/SuppliersManager").then((m) => ({ default: m.SuppliersManager })));
 const ClientDetailModal = lazy(() => import("./features/clients/ClientDetailModal").then((m) => ({ default: m.ClientDetailModal })));
 const SettingsEditorial = lazy(() => import("./features/settings/SettingsEditorial").then((m) => ({ default: m.SettingsEditorial })));
+const ProductSalesView = lazy(() => import("./features/sales/ProductSalesView").then((m) => ({ default: m.ProductSalesView })));
 import { Toast } from "./components/Toast";
 import {
-  dailyRevenueSeries,
   employeePerformance,
   revenueForCurrentWeek,
   revenueForDay,
   revenueForMonth,
-  upcomingAppointments
+  salesForCurrentWeek,
+  salesForDay,
+  salesForMonth
 } from "./lib/calculations";
-import { getAvailableSlots, hasAvailability } from "./lib/availability";
+import { hasAvailability } from "./lib/availability";
+import { appointmentStatusLabel } from "./lib/appointmentUi";
+import { downloadExcel } from "./lib/excelExport";
 import { formatCurrency, formatDate, formatLongDate, initialsFromName, todayISO, uid } from "./lib/format";
 import { parseRoute, type Route } from "./lib/routing";
 import { databaseService } from "./services/databaseService";
@@ -65,11 +65,11 @@ import type {
   AppState,
   Appointment,
   AppointmentFilters,
-  AppointmentStatus,
   Client,
   PaymentStatus,
   Role,
-  ServiceItem
+  Sale,
+  SalePaymentMethod
 } from "./types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -78,10 +78,16 @@ import type {
 // subsección (pestaña) dentro de Citas. Por eso ya no aparece en `Section`.
 type Section = "dashboard" | "calendar" | "appointments" | "employees" | "catalog" | "suppliers" | "stats" | "cash" | "settings";
 
+const normalizeOptionalPhone = (phone: string) => {
+  const { country, national } = parsePhone(phone);
+  if (national.length !== 10) return "";
+  return `${country === "US" ? "1" : "52"}${national}`;
+};
+
 const navItems: { id: Section; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "calendar", label: "Calendario", icon: CalendarDays },
-  { id: "appointments", label: "Citas", icon: Clock },
+  { id: "appointments", label: "Agenda", icon: Clock },
   { id: "employees", label: "Empleados", icon: BriefcaseBusiness },
   { id: "catalog", label: "Productos y servicios", icon: Package },
   { id: "suppliers", label: "Proveedores", icon: Truck },
@@ -98,6 +104,36 @@ const defaultFilters: AppointmentFilters = {
   service: "all",
   sort: "recent"
 };
+
+const appointmentStatusValues = new Set(["all", "pending", "confirmed", "completed", "cancelled", "no_show"]);
+const appointmentSortValues = new Set(["recent", "client"]);
+
+function loadAppointmentFilters(storageKey: string): AppointmentFilters {
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return defaultFilters;
+    const parsed = JSON.parse(raw) as Partial<AppointmentFilters>;
+    return {
+      query: typeof parsed.query === "string" ? parsed.query : defaultFilters.query,
+      date: typeof parsed.date === "string" ? parsed.date : defaultFilters.date,
+      status: typeof parsed.status === "string" && appointmentStatusValues.has(parsed.status)
+        ? parsed.status as AppointmentFilters["status"]
+        : defaultFilters.status,
+      employeeId: typeof parsed.employeeId === "string" ? parsed.employeeId : defaultFilters.employeeId,
+      service: typeof parsed.service === "string" ? parsed.service : defaultFilters.service,
+      sort: typeof parsed.sort === "string" && appointmentSortValues.has(parsed.sort)
+        ? parsed.sort as AppointmentFilters["sort"]
+        : defaultFilters.sort
+    };
+  } catch {
+    return defaultFilters;
+  }
+}
+
+function loadAppointmentsTab(storageKey: string): "list" | "web" {
+  const saved = window.localStorage.getItem(storageKey);
+  return saved === "web" ? "web" : "list";
+}
 
 // ─── Mobile bottom nav ────────────────────────────────────────────────────────
 
@@ -157,6 +193,14 @@ export function App() {
     return (
       <Suspense fallback={<JShellSkeleton />}>
         <PublicBookingSite slug={route.slug} />
+      </Suspense>
+    );
+  }
+
+  if (route.kind === "legal") {
+    return (
+      <Suspense fallback={<JShellSkeleton />}>
+        <LegalPage page={route.page} />
       </Suspense>
     );
   }
@@ -269,7 +313,9 @@ function DashboardApp() {
   if (!session || !businessState) {
     return (
       <>
-        <LoginScreen onLogin={() => void loadAuthenticatedUser()} setupMessage={setupMessage} currentUserId={currentUserId} />
+        <Suspense fallback={<JShellSkeleton />}>
+          <LoginScreen onLogin={() => void loadAuthenticatedUser()} setupMessage={setupMessage} currentUserId={currentUserId} />
+        </Suspense>
         <Toast message={toast} />
       </>
     );
@@ -305,6 +351,7 @@ function DashboardApp() {
       <BusinessDashboard
         businessState={businessState}
         setBusiness={updateBusiness}
+        applyLocal={setBusinessState}
         session={session}
         onLogout={handleLogout}
         onToast={showToast}
@@ -314,204 +361,21 @@ function DashboardApp() {
   );
 }
 
-// ─── Login screen ─────────────────────────────────────────────────────────────
-
-function LoginScreen({
-  onLogin,
-  setupMessage,
-  currentUserId
-}: {
-  onLogin: () => void;
-  setupMessage: string;
-  currentUserId: string;
-}) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
-    setLoading(true);
-
-    try {
-      if (!supabase) {
-        setError("Supabase no esta configurado.");
-        return;
-      }
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: email.trim(),
-        password
-      });
-      if (signInError) {
-        setError("Correo o contraseña incorrectos.");
-        return;
-      }
-      onLogin();
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="j-login">
-      {/* LEFT — editorial dark panel */}
-      <aside className="j-login-aside">
-        <div className="j-la-top">
-          <div className="flex items-center gap-3">
-            <div className="j-brand-mark" style={{ background: "rgba(255,255,255,0.15)", color: "#fff", boxShadow: "none" }}>J</div>
-            <div>
-              <div style={{ fontWeight: 600, letterSpacing: "0.06em", fontSize: 13 }}>JACK</div>
-              <div style={{ fontSize: 10.5, opacity: 0.55, letterSpacing: "0.02em" }}>
-                Sistema de gestión empresarial
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="j-la-quote">
-          <div className="j-la-eyebrow">— Jack · 2026</div>
-          <p className="j-la-q">
-            Una plataforma para <i>organizar tu agenda</i>, ver tus citas y entender tu negocio en un solo lugar.
-          </p>
-        </div>
-
-        <div className="j-la-stats">
-          <div>
-            <div className="j-la-stat-v">100%</div>
-            <div className="j-la-stat-l">Acceso restringido</div>
-          </div>
-          <div>
-            <div className="j-la-stat-v">Tiempo real</div>
-            <div className="j-la-stat-l">Sincronización</div>
-          </div>
-          <div>
-            <div className="j-la-stat-v">Supabase</div>
-            <div className="j-la-stat-l">Auth + datos</div>
-          </div>
-        </div>
-
-        <svg className="j-la-grid" width="100%" height="100%" preserveAspectRatio="none">
-          <defs>
-            <pattern id="jlg" x="0" y="0" width="64" height="64" patternUnits="userSpaceOnUse">
-              <path d="M64 0 L0 0 0 64" fill="none" stroke="rgba(255,255,255,.05)" strokeWidth=".5" />
-            </pattern>
-          </defs>
-          <rect width="100%" height="100%" fill="url(#jlg)" />
-        </svg>
-      </aside>
-
-      {/* RIGHT — form */}
-      <main className="j-login-main">
-        <div className="j-lm-top">
-          <span>Acceso restringido. Tu administrador crea tu cuenta.</span>
-        </div>
-
-        <div className="j-lm-form-wrap">
-          <form className="j-lm-form" onSubmit={handleSubmit}>
-            <div className="j-lm-restricted">
-              <span style={{ width: 6, height: 6, background: "var(--fg)", borderRadius: "50%" }} />
-              <span>Acceso restringido</span>
-            </div>
-
-            <h1 className="j-lm-h1">
-              Bienvenido <span className="serif">de vuelta</span>
-            </h1>
-            <p className="j-lm-sub">
-              Inicia sesión con tu cuenta de Jack para acceder al panel de tu negocio.
-            </p>
-
-            <div className="j-lm-field">
-              <label htmlFor="login-email">Correo electrónico</label>
-              <input
-                id="login-email"
-                className="j-lm-input"
-                type="email"
-                autoComplete="email"
-                placeholder="tu@correo.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                autoFocus
-              />
-            </div>
-
-            <div className="j-lm-field">
-              <label htmlFor="login-password">Contraseña</label>
-              <input
-                id="login-password"
-                className="j-lm-input"
-                type="password"
-                autoComplete="current-password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-            </div>
-
-            {error && (
-              <div className="j-lm-alert err">
-                <AlertCircle size={15} />
-                <span>{error}</span>
-              </div>
-            )}
-
-            {setupMessage && (
-              <div className="j-lm-alert warn">
-                <AlertCircle size={15} />
-                <div>
-                  <p style={{ margin: 0 }}>{setupMessage}</p>
-                  {currentUserId && (
-                    <p className="mono" style={{ marginTop: 6, fontSize: 11, wordBreak: "break-all" }}>
-                      auth user id: {currentUserId}
-                    </p>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <button type="submit" className="j-lm-submit" disabled={loading}>
-              {loading ? (
-                <>
-                  <svg width="14" height="14" viewBox="0 0 24 24" style={{ animation: "spin 0.8s linear infinite" }}>
-                    <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2" opacity=".25" />
-                    <path d="M21 12a9 9 0 0 0-9-9" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                  </svg>
-                  Iniciando sesión…
-                </>
-              ) : (
-                <>
-                  Iniciar sesión <ChevronRight size={14} />
-                </>
-              )}
-            </button>
-          </form>
-        </div>
-
-        <div className="j-lm-foot">
-          <span>© {new Date().getFullYear()} Jack</span>
-          <span>·</span>
-          <span>Powered by Jack</span>
-          <span className="mono" style={{ marginLeft: "auto" }}>v 2.4.1</span>
-        </div>
-      </main>
-    </div>
-  );
-}
-
 // ─── Business Dashboard ───────────────────────────────────────────────────────
 
 function BusinessDashboard({
   businessState,
   setBusiness,
+  applyLocal,
   session,
   onLogout,
   onToast
 }: {
   businessState: AppState;
   setBusiness: (state: AppState) => void;
+  // #1: actualización local SIN guardado completo de app_state. Las citas/clientes
+  // persisten por fila (upsert directo); applyLocal solo refresca la UI optimista.
+  applyLocal: (state: AppState) => void;
   session: AppSession;
   onLogout: () => void;
   onToast: (msg: string) => void;
@@ -521,17 +385,20 @@ function BusinessDashboard({
     ? ["dashboard", "calendar", "appointments", "settings"]
     : ["dashboard", "calendar", "appointments", "employees", "catalog", "suppliers", "cash", "stats", "settings"];
   const sectionStorageKey = `jack:last-section:${session.userId}`;
+  const appointmentsFiltersStorageKey = `jack:appointments-filters:${session.businessId ?? "global"}:${session.userId}`;
+  const appointmentsTabStorageKey = `jack:appointments-tab:${session.businessId ?? "global"}:${session.userId}`;
   const [section, setSectionState] = useState<Section>(() => {
     const saved = window.localStorage.getItem(sectionStorageKey) as Section | null;
     return saved && allowedSections.includes(saved) ? saved : "dashboard";
   });
-  const [filters, setFilters] = useState(defaultFilters);
+  const [filters, setFiltersState] = useState<AppointmentFilters>(() => loadAppointmentFilters(appointmentsFiltersStorageKey));
   const [appointmentDraft, setAppointmentDraft] = useState<Appointment | null>(null);
   const [activeAppointment, setActiveAppointment] = useState<Appointment | null>(null);
   const [activeClient, setActiveClient] = useState<Client | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  // P2: pestaña dentro de Citas — "list" (citas) | "web" (reservaciones web por confirmar).
-  const [appointmentsTab, setAppointmentsTab] = useState<"list" | "web">("list");
+  // Pestaña dentro de Agenda — "list" (citas) | "sales" (ventas de productos) | "web" (reservaciones web).
+  const [appointmentsTabState, setAppointmentsTabState] = useState<"list" | "sales" | "web">(() => loadAppointmentsTab(appointmentsTabStorageKey) as "list" | "sales" | "web");
+  const appointmentsTab = appointmentsTabState;
 
   const today = todayISO();
   const currency = businessState.config.currency;
@@ -540,6 +407,16 @@ function BusinessDashboard({
     const safeNext = allowedSections.includes(next) ? next : "dashboard";
     setSectionState(safeNext);
     window.localStorage.setItem(sectionStorageKey, safeNext);
+  };
+
+  const setFilters = (next: AppointmentFilters) => {
+    setFiltersState(next);
+    window.localStorage.setItem(appointmentsFiltersStorageKey, JSON.stringify(next));
+  };
+
+  const setAppointmentsTab = (next: "list" | "sales" | "web") => {
+    setAppointmentsTabState(next);
+    window.localStorage.setItem(appointmentsTabStorageKey, next);
   };
 
   const activeEmployee = session.employeeId
@@ -555,9 +432,8 @@ function BusinessDashboard({
     [businessState.employees]
   );
 
-  // Una reserva web "por confirmar" = source public_site + status pending. Vive SOLO
-  // en la pestaña "Reservaciones web". Al confirmarse (status confirmed) sale de aquí
-  // y entra al listado normal de citas. Así no hay duplicados entre ambas listas (P3).
+  // Reservación web por aceptar = solicitud que llegó del sitio público y todavía
+  // no se convierte en cita formal. Al aceptarla se vuelve cita normal pendiente.
   const isPendingWebReservation = (a: Appointment) => a.source === "public_site" && a.status === "pending";
 
   const pendingWebReservations = useMemo(() => {
@@ -568,13 +444,14 @@ function BusinessDashboard({
       .filter(isPendingWebReservation)
       .sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`));
   }, [activeEmployee?.id, role, businessState.appointments]);
+  const pendingWebReservationsCount = pendingWebReservations.length;
 
   const visibleAppointments = useMemo(() => {
     const base = role === "employee"
       ? businessState.appointments.filter((a) => a.employeeId === activeEmployee?.id)
       : businessState.appointments;
     const filtered = base.filter((a) => {
-      if (isPendingWebReservation(a)) return false; // las reservas por confirmar viven en su pestaña
+      if (isPendingWebReservation(a)) return false; // solicitudes web sin aceptar viven en su pestaña
       const client = clientById.get(a.clientId);
       const matchesQuery = (client?.name ?? "").toLowerCase().includes(filters.query.toLowerCase());
       const matchesDate = !filters.date || a.date === filters.date;
@@ -603,7 +480,7 @@ function BusinessDashboard({
     const service = businessState.config.services[0];
     return {
       id: uid("apt"),
-      clientId: businessState.clients[0]?.id ?? "",
+      clientId: "",
       service: service?.name ?? "",
       date: today,
       time: "10:00",
@@ -620,12 +497,57 @@ function BusinessDashboard({
     };
   };
 
+  // #1: persistencia DIRECTA por fila (no reescribe app_state completo). La cita/cliente
+  // van a su tabla normalizada (fuente de verdad, RLS permite a employee sus citas) y el
+  // app_state se sincroniza best-effort (compat + frescura para public-booking).
+  const bizId = session.businessId;
+  const persistAppointmentRow = (next: AppState, appt: Appointment) => {
+    applyLocal(next);
+    if (!bizId) return;
+    void databaseService
+      .upsertAppointment(bizId, appt)
+      .catch((error) => { void monitoringService.captureError(error, "appointment.upsert", { bizId, id: appt.id }); onToast("No se pudo guardar la cita"); });
+    void databaseService.saveAppStateBestEffort(bizId, next);
+  };
+  const persistClientRow = (next: AppState, client: Client) => {
+    applyLocal(next);
+    if (!bizId) return;
+    void databaseService
+      .upsertClient(bizId, client)
+      .catch((error) => { void monitoringService.captureError(error, "client.upsert", { bizId, id: client.id }); onToast("No se pudo guardar el cliente"); });
+    void databaseService.saveAppStateBestEffort(bizId, next);
+  };
+  // #2: secciones migradas a escritura por fila (catálogo, proveedores, caja,
+  // ventas). La UI se actualiza local y el app_state se sincroniza best-effort
+  // como espejo/compat; la FILA normalizada es la fuente de verdad (el manager
+  // hace su upsert/softDelete por entidad). Ya NO se usa saveBusinessState aquí.
+  const applyWithStateMirror = (next: AppState) => {
+    applyLocal(next);
+    if (bizId) void databaseService.saveAppStateBestEffort(bizId, next);
+  };
+  // #1 (ventas): la venta se INSERTA por fila en business_sales y el stock se
+  // actualiza por producto. Así un `employee` puede vender (no puede escribir el
+  // JSON completo de businesses) y no hay race con otros guardados.
+  const persistSaleRow = (next: AppState, sale: Sale, stockChanges: { id: string; stock: number }[]) => {
+    applyLocal(next);
+    if (!bizId) return;
+    void databaseService
+      .insertSale(bizId, sale)
+      .catch((error) => { void monitoringService.captureError(error, "sale.insert", { bizId, id: sale.id }); onToast("No se pudo guardar la venta"); });
+    for (const change of stockChanges) {
+      void databaseService
+        .updateProductStock(bizId, change.id, change.stock)
+        .catch((error) => monitoringService.captureError(error, "sale.stock", { bizId, id: change.id }));
+    }
+    void databaseService.saveAppStateBestEffort(bizId, next);
+  };
+
   const createClientInline = (name: string, phone: string): Client => {
     const service = businessState.config.services[0];
     const newClient: Client = {
       id: uid("cli"),
       name,
-      phone,
+      phone: normalizeOptionalPhone(phone),
       email: "",
       requestedService: service?.name ?? "",
       amount: service?.basePrice ?? 0,
@@ -635,7 +557,7 @@ function BusinessDashboard({
       assignedEmployeeId: businessState.employees[0]?.id ?? "",
       notes: ""
     };
-    setBusiness({ ...businessState, clients: [newClient, ...businessState.clients] });
+    persistClientRow({ ...businessState, clients: [newClient, ...businessState.clients] }, newClient);
     onToast("Cliente creado");
     return newClient;
   };
@@ -656,97 +578,127 @@ function BusinessDashboard({
       return onToast("Ese horario ya esta ocupado para el empleado");
     }
     const exists = businessState.appointments.some((a) => a.id === appointmentDraft.id);
-    setBusiness({
+    const next = {
       ...businessState,
       appointments: exists
         ? businessState.appointments.map((a) => (a.id === appointmentDraft.id ? appointmentDraft : a))
         : [appointmentDraft, ...businessState.appointments]
-    });
+    };
+    persistAppointmentRow(next, appointmentDraft);
     setAppointmentDraft(null);
     onToast(exists ? "Cita actualizada" : "Cita creada");
   };
 
   const deleteAppointment = (id: string) => {
     if (!confirm("Eliminar esta cita?")) return;
-    setBusiness({ ...businessState, appointments: businessState.appointments.filter((a) => a.id !== id) });
-    // #2/#5: soft-delete explícito en la tabla normalizada para que la cita no
-    // reaparezca al recargar (la fuente principal son las tablas normalizadas).
-    if (session.businessId) {
+    const next = { ...businessState, appointments: businessState.appointments.filter((a) => a.id !== id) };
+    applyLocal(next);
+    // #1/#2/#5: soft-delete DIRECTO por fila (fuente de verdad) + app_state best-effort.
+    if (bizId) {
       void databaseService
-        .softDeleteAppointment(session.businessId, id)
-        .catch((error) => monitoringService.captureError(error, "appointment.softDelete", { businessId: session.businessId, id }));
+        .softDeleteAppointment(bizId, id)
+        .catch((error) => monitoringService.captureError(error, "appointment.softDelete", { bizId, id }));
+      void databaseService.saveAppStateBestEffort(bizId, next);
     }
     onToast("Cita eliminada");
   };
 
   const updateAppointmentStatus = (id: string, status: Appointment["status"]) => {
     const current = businessState.appointments.find((a) => a.id === id);
-    setBusiness({
-      ...businessState,
-      appointments: businessState.appointments.map((a) => a.id === id ? { ...a, status } : a)
-    });
-    if (session.businessId && current?.status !== status) {
+    if (!current) return null;
+    const acceptsWebReservation = current.source === "public_site" && current.status === "pending" && status === "confirmed";
+    const updatedAppointment: Appointment = acceptsWebReservation
+      ? { ...current, source: "dashboard", status: "pending" }
+      : { ...current, status };
+    persistAppointmentRow(
+      {
+        ...businessState,
+        appointments: businessState.appointments.map((appointment) => appointment.id === id ? updatedAppointment : appointment)
+      },
+      updatedAppointment
+    );
+    if (session.businessId && (current.status !== updatedAppointment.status || current.source !== updatedAppointment.source)) {
       void databaseService.recordAppointmentAudit({
         businessId: session.businessId,
         appointmentId: id,
         action: "status_changed",
-        oldValue: current?.status,
-        newValue: status
+        oldValue: `${current.source}:${current.status}`,
+        newValue: `${updatedAppointment.source}:${updatedAppointment.status}`
       }).catch((error) => monitoringService.captureError(error, "audit.status"));
     }
-    onToast("Estado actualizado");
+    onToast(acceptsWebReservation ? "Reserva aceptada como cita pendiente" : "Estado actualizado");
+    return updatedAppointment;
   };
 
-  const updateAppointmentPayment = (id: string, paymentStatus: PaymentStatus) => {
+  const updateAppointmentPayment = (id: string, paymentStatus: PaymentStatus, paymentMethod?: SalePaymentMethod) => {
     const current = businessState.appointments.find((appointment) => appointment.id === id);
-    setBusiness({
-      ...businessState,
-      appointments: businessState.appointments.map((appointment) => {
-        if (appointment.id !== id) return appointment;
-        const paidAmount = paymentStatus === "paid" ? appointment.price : 0;
-        return { ...appointment, paymentStatus, paidAmount };
-      })
-    });
-    if (session.businessId && current?.paymentStatus !== paymentStatus) {
+    if (!current) return;
+    const updatedAppointment: Appointment = {
+      ...current,
+      paymentStatus,
+      // Corte v2: al pagar se registra el método; al quitar el pago se limpia.
+      paymentMethod: paymentStatus === "paid" ? (paymentMethod ?? current.paymentMethod) : undefined,
+      paidAmount: paymentStatus === "paid" ? current.price : 0
+    };
+    persistAppointmentRow(
+      {
+        ...businessState,
+        appointments: businessState.appointments.map((appointment) => appointment.id === id ? updatedAppointment : appointment)
+      },
+      updatedAppointment
+    );
+    if (session.businessId && (current.paymentStatus !== paymentStatus || current.paymentMethod !== updatedAppointment.paymentMethod)) {
       void databaseService.recordAppointmentAudit({
         businessId: session.businessId,
         appointmentId: id,
         action: "payment_changed",
         oldValue: current?.paymentStatus,
-        newValue: paymentStatus
+        newValue: paymentStatus === "paid" && updatedAppointment.paymentMethod ? `paid:${updatedAppointment.paymentMethod}` : paymentStatus
       }).catch((error) => monitoringService.captureError(error, "audit.payment"));
     }
     onToast("Pago actualizado");
   };
 
-  const exportRowsCsv = (filename: string, rows: Record<string, string | number>[]) => {
-    const csv = [
-      Object.keys(rows[0] ?? {}).join(","),
-      ...rows.map((row) => Object.values(row).map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-    onToast("CSV exportado");
+  const appointmentExcelRows = (appointments: Appointment[]) => appointments.map((a) => ({
+    Cliente: clientById.get(a.clientId)?.name ?? "Sin cliente",
+    Teléfono: clientById.get(a.clientId)?.phone ?? "",
+    Servicio: a.service,
+    Fecha: a.date,
+    Hora: a.time,
+    Duración: a.duration,
+    Precio: a.price,
+    Pagado: a.paidAmount,
+    Saldo: Math.max(a.price - a.paidAmount, 0),
+    Empleado: employeeById.get(a.employeeId)?.name ?? "",
+    Estado: appointmentStatusLabel(a),
+    Pago: a.paymentStatus === "paid" ? "Pagado" : "Sin pagar",
+    Origen: a.source === "public_site" ? "Sitio web" : "Dashboard",
+    Notas: a.notes ?? ""
+  }));
+
+  const exportAppointmentsExcel = () => {
+    downloadExcel("citas", "Citas", appointmentExcelRows(visibleAppointments));
+    onToast("Exportación descargada");
   };
 
-  const exportCsv = () => {
-    exportRowsCsv("citas.csv", visibleAppointments.map((a) => ({
-      cliente: clientById.get(a.clientId)?.name ?? "Sin cliente",
-      telefono: clientById.get(a.clientId)?.phone ?? "",
-      servicio: a.service,
-      fecha: a.date,
-      hora: a.time,
-      precio: a.price,
-      pagado: a.paidAmount,
-      empleado: employeeById.get(a.employeeId)?.name ?? "",
-      estado: a.status,
-      origen: a.source
-    })));
+  const exportDashboardExcel = () => {
+    const appointments = role === "employee"
+      ? businessState.appointments.filter((a) => a.employeeId === activeEmployee?.id)
+      : businessState.appointments;
+    const sales = role === "employee"
+      ? allSales.filter((s) => s.employeeId === activeEmployee?.id)
+      : allSales;
+    const now = new Date(`${today}T12:00:00`);
+    downloadExcel("dashboard", "Dashboard Jack", [
+      { Métrica: "Ingresos de hoy (citas + ventas)", Valor: revenueForDay(appointments, today) + salesForDay(sales, today) },
+      { Métrica: "Ingresos de la semana (citas + ventas)", Valor: revenueForCurrentWeek(appointments, today) + salesForCurrentWeek(sales, today) },
+      { Métrica: "Ingresos del mes (citas + ventas)", Valor: revenueForMonth(appointments, now.getFullYear(), now.getMonth()) + salesForMonth(sales, now.getFullYear(), now.getMonth()) },
+      { Métrica: "Total de citas", Valor: appointments.length },
+      { Métrica: "Ventas de productos", Valor: sales.length },
+      { Métrica: "Clientes registrados", Valor: businessState.clients.length },
+      { Métrica: "Cambio mensual %", Valor: monthlyChange }
+    ]);
+    onToast("Exportación descargada");
   };
 
   const openAppointmentWhatsApp = (appointment: Appointment) => {
@@ -766,10 +718,15 @@ function BusinessDashboard({
   };
 
   const currentDate = new Date(`${today}T12:00:00`);
-  const currentMonthRevenue = revenueForMonth(businessState.appointments, currentDate.getFullYear(), currentDate.getMonth());
+  // #3: el cambio mensual compara citas + ventas de productos (misma base que los
+  // KPIs del dashboard, para no mostrar un % calculado sobre otra cifra).
+  const allSales = businessState.sales ?? [];
+  const currentMonthRevenue = revenueForMonth(businessState.appointments, currentDate.getFullYear(), currentDate.getMonth())
+    + salesForMonth(allSales, currentDate.getFullYear(), currentDate.getMonth());
   const prevYear = currentDate.getMonth() === 0 ? currentDate.getFullYear() - 1 : currentDate.getFullYear();
   const prevMonth = currentDate.getMonth() === 0 ? 11 : currentDate.getMonth() - 1;
-  const previousMonthRevenue = revenueForMonth(businessState.appointments, prevYear, prevMonth);
+  const previousMonthRevenue = revenueForMonth(businessState.appointments, prevYear, prevMonth)
+    + salesForMonth(allSales, prevYear, prevMonth);
   const monthlyChange = previousMonthRevenue
     ? Math.round(((currentMonthRevenue - previousMonthRevenue) / previousMonthRevenue) * 100)
     : 100;
@@ -937,6 +894,7 @@ function BusinessDashboard({
               clientById={clientById}
               employeeById={employeeById}
               onOpenAppointment={setActiveAppointment}
+              onExportExcel={exportDashboardExcel}
             />
           )}
           {section === "calendar" && (
@@ -946,20 +904,28 @@ function BusinessDashboard({
               employeeById={employeeById}
               today={today}
               onOpenAppointment={setActiveAppointment}
+              onNewAppointment={(date) => setAppointmentDraft({ ...emptyAppointment(), date })}
+              onExportExcel={(appointments) => {
+                downloadExcel("calendario", "Calendario", appointmentExcelRows(appointments));
+                onToast("Exportación descargada");
+              }}
             />
           )}
           {section === "appointments" && (
             <div className="space-y-4">
-              {/* P2: Reservaciones web vive como subsección/pestaña dentro de Citas. */}
+              {/* Pestañas dentro de Agenda: Citas | Ventas | Reservaciones web */}
               <div className="j-seg" style={{ width: "fit-content" }}>
                 <button type="button" className={appointmentsTab === "list" ? "active" : ""} onClick={() => setAppointmentsTab("list")}>
                   Citas
                 </button>
+                <button type="button" className={appointmentsTab === "sales" ? "active" : ""} onClick={() => setAppointmentsTab("sales")}>
+                  Ventas
+                </button>
                 <button type="button" className={appointmentsTab === "web" ? "active" : ""} onClick={() => setAppointmentsTab("web")}>
-                  Reservaciones web{pendingWebReservations.length > 0 ? ` (${pendingWebReservations.length})` : ""}
+                  Reservaciones web{pendingWebReservationsCount > 0 ? ` (${pendingWebReservationsCount})` : ""}
                 </button>
               </div>
-              {appointmentsTab === "list" ? (
+              {appointmentsTab === "list" && (
                 <AppointmentsView
                   state={businessState}
                   filters={filters}
@@ -970,9 +936,22 @@ function BusinessDashboard({
                   onAdd={() => setAppointmentDraft(emptyAppointment())}
                   onOpen={setActiveAppointment}
                   onOpenClient={setActiveClient}
-                  exportCsv={exportCsv}
+                  exportExcel={exportAppointmentsExcel}
                 />
-              ) : (
+              )}
+              {appointmentsTab === "sales" && (
+                <Suspense fallback={<JShellSkeleton />}>
+                  <ProductSalesView
+                    state={businessState}
+                    onRegisterSale={persistSaleRow}
+                    currency={currency}
+                    employeeId={session.employeeId}
+                    employees={businessState.employees}
+                    onToast={onToast}
+                  />
+                </Suspense>
+              )}
+              {appointmentsTab === "web" && (
                 <WebReservationsView
                   reservations={pendingWebReservations}
                   clientById={clientById}
@@ -1005,17 +984,17 @@ function BusinessDashboard({
             </div>
           )}
           {section === "catalog" && (
-            <CatalogManager businessId={session.businessId ?? ""} state={businessState} setState={setBusiness} onToast={onToast} />
+            <CatalogManager businessId={session.businessId ?? ""} state={businessState} setState={applyWithStateMirror} onToast={onToast} />
           )}
           {section === "suppliers" && (
-            <SuppliersManager businessId={session.businessId ?? ""} state={businessState} setState={setBusiness} onToast={onToast} />
+            <SuppliersManager businessId={session.businessId ?? ""} state={businessState} setState={applyWithStateMirror} onToast={onToast} />
           )}
           {section === "stats" && <StatsManager state={businessState} today={today} />}
           {section === "cash" && (
             <CashManager
               businessId={session.businessId ?? ""}
               state={businessState}
-              setState={setBusiness}
+              setState={applyWithStateMirror}
               today={today}
               closedBy={session.name}
               onToast={onToast}
@@ -1046,18 +1025,21 @@ function BusinessDashboard({
       />
 
       {appointmentDraft && (
-        <NewAppointmentFullScreen
-          draft={appointmentDraft}
-          isNew={!businessState.appointments.some((a) => a.id === appointmentDraft.id)}
-          state={businessState}
-          appointments={businessState.appointments}
-          onChange={setAppointmentDraft}
-          onSave={saveAppointment}
-          onClose={() => setAppointmentDraft(null)}
-          onCreateClient={createClientInline}
-        />
+        <Suspense fallback={null}>
+          <NewAppointmentFullScreen
+            draft={appointmentDraft}
+            isNew={!businessState.appointments.some((a) => a.id === appointmentDraft.id)}
+            state={businessState}
+            appointments={businessState.appointments}
+            onChange={setAppointmentDraft}
+            onSave={saveAppointment}
+            onClose={() => setAppointmentDraft(null)}
+            onCreateClient={createClientInline}
+          />
+        </Suspense>
       )}
       {activeAppointment && (
+        <Suspense fallback={null}>
         <AppointmentDetailModal
           appointment={activeAppointment}
           client={clientById.get(activeAppointment.clientId)}
@@ -1070,13 +1052,18 @@ function BusinessDashboard({
             setAppointmentDraft(appointment);
           }}
           onStatus={(status) => {
-            updateAppointmentStatus(activeAppointment.id, status);
-            setActiveAppointment({ ...activeAppointment, status });
+            const updated = updateAppointmentStatus(activeAppointment.id, status);
+            setActiveAppointment(updated ?? { ...activeAppointment, status });
           }}
-          onPayment={(paymentStatus) => {
-            updateAppointmentPayment(activeAppointment.id, paymentStatus);
+          onPayment={(paymentStatus, paymentMethod) => {
+            updateAppointmentPayment(activeAppointment.id, paymentStatus, paymentMethod);
             const paidAmount = paymentStatus === "paid" ? activeAppointment.price : 0;
-            setActiveAppointment({ ...activeAppointment, paymentStatus, paidAmount });
+            setActiveAppointment({
+              ...activeAppointment,
+              paymentStatus,
+              paymentMethod: paymentStatus === "paid" ? (paymentMethod ?? activeAppointment.paymentMethod) : undefined,
+              paidAmount
+            });
           }}
           onWhatsApp={() => openAppointmentWhatsApp(activeAppointment)}
           onDelete={(id) => {
@@ -1084,6 +1071,7 @@ function BusinessDashboard({
             setActiveAppointment(null);
           }}
         />
+        </Suspense>
       )}
       {activeClient && (
         <Suspense fallback={null}>
@@ -1101,11 +1089,7 @@ function BusinessDashboard({
   );
 }
 
-// ─── Section title ─────────────────────────────────────────────────────────────
-
-function sectionTitle(section: Section, role: Role) {
-  return pageMeta(section, role).title;
-}
+// ─── Page meta ──────────────────────────────────────────────────────────────────
 
 function pageMeta(section: Section, role: Role): { crumb: string; title: string; accent: string; sub: string } {
   const meta: Record<Section, { crumb: string; title: string; accent: string; sub: string }> = {
@@ -1124,10 +1108,10 @@ function pageMeta(section: Section, role: Role): { crumb: string; title: string;
       sub: "Vista de todas las citas del equipo. Haz clic en un día para verlo en detalle."
     },
     appointments: {
-      crumb: "Citas",
-      title: "Citas",
-      accent: "agendadas",
-      sub: "Historial, próximas reservaciones y reservas web por confirmar."
+      crumb: "Agenda",
+      title: "Agenda",
+      accent: "y ventas",
+      sub: "Citas agendadas, registro de ventas de productos y reservas web por confirmar."
     },
     employees: {
       crumb: "Empleados",
@@ -1171,467 +1155,13 @@ function pageMeta(section: Section, role: Role): { crumb: string; title: string;
   return meta[section];
 }
 
-// ─── Calendar View ─────────────────────────────────────────────────────────────
-
-function CalendarView({
-  appointments,
-  clientById,
-  employeeById,
-  today,
-  onOpenAppointment
-}: {
-  appointments: Appointment[];
-  clientById: Map<string, Client>;
-  employeeById: Map<string, AppState["employees"][number]>;
-  today: string;
-  onOpenAppointment: (appointment: Appointment) => void;
-}) {
-  const todayDate = new Date(`${today}T12:00:00`);
-  const [viewMonth, setViewMonth] = useState(new Date(todayDate.getFullYear(), todayDate.getMonth(), 1));
-  const [selectedDay, setSelectedDay] = useState<string>(today);
-
-  const year = viewMonth.getFullYear();
-  const month = viewMonth.getMonth();
-
-  const MONTH_NAMES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
-  const DAY_HEADERS = ["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
-
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const firstDayOffset = (new Date(year, month, 1).getDay() + 6) % 7;
-
-  const byDate = useMemo(() => {
-    const map = new Map<string, Appointment[]>();
-    appointments.forEach((a) => {
-      if (!map.has(a.date)) map.set(a.date, []);
-      map.get(a.date)!.push(a);
-    });
-    return map;
-  }, [appointments]);
-
-  const cells: (string | null)[] = [
-    ...Array(firstDayOffset).fill(null),
-    ...Array.from({ length: daysInMonth }, (_, i) => {
-      const d = i + 1;
-      return `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-    })
-  ];
-
-  const selectedAppointments = (byDate.get(selectedDay) ?? []).sort((a, b) => a.time.localeCompare(b.time));
-
-  const monthApts = appointments.filter((a) => {
-    const d = new Date(`${a.date}T12:00:00`);
-    return d.getFullYear() === year && d.getMonth() === month;
-  });
-
-  return (
-    <>
-      <div className="j-cal-toolbar">
-        <div className="j-cal-nav">
-          <button onClick={() => setViewMonth(new Date(year, month - 1, 1))} aria-label="Mes anterior">
-            <ChevronLeft size={14} />
-          </button>
-          <span className="j-cal-nav-label">{MONTH_NAMES[month]} {year}</span>
-          <button onClick={() => setViewMonth(new Date(year, month + 1, 1))} aria-label="Mes siguiente">
-            <ChevronRight size={14} />
-          </button>
-        </div>
-        <button className="j-btn j-btn-sm" onClick={() => { setViewMonth(new Date(todayDate.getFullYear(), todayDate.getMonth(), 1)); setSelectedDay(today); }}>
-          Hoy
-        </button>
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-            <b style={{ color: "var(--fg)" }} className="mono">{monthApts.length}</b> citas en el periodo
-          </span>
-          <span className="j-tag dot pos">Confirmada</span>
-          <span className="j-tag dot warn">Pendiente</span>
-        </div>
-      </div>
-
-      <div className="j-cal-month">
-        {DAY_HEADERS.map((d) => (
-          <div key={d} className="j-cal-mhead">{d}</div>
-        ))}
-        {cells.map((dateStr, i) => {
-          if (!dateStr) return <div key={`empty-${i}`} className="j-cal-mcell out" />;
-          const dayApts = byDate.get(dateStr) ?? [];
-          const isToday = dateStr === today;
-          const isSelected = dateStr === selectedDay;
-          const dayNum = new Date(`${dateStr}T12:00:00`).getDate();
-          const hasPending = dayApts.some((a) => a.status === "pending");
-          const hasCancel = dayApts.some((a) => a.status === "cancelled");
-          return (
-            <div
-              key={dateStr}
-              className={"j-cal-mcell" + (isToday ? " today" : "") + (isSelected ? " selected" : "")}
-              onClick={() => setSelectedDay(dateStr)}
-            >
-              <div className="j-cal-mday">{dayNum}</div>
-              {dayApts.length > 0 && (
-                <div className="j-cal-mdots">
-                  <div className="dots">
-                    <span className="dot" />
-                    {hasPending && <span className="dot pending" />}
-                    {hasCancel && <span className="dot cancel" />}
-                  </div>
-                  <span className="cnt">{dayApts.length}</span>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Day detail panel — appears below the month */}
-      <div className="j-cal-day-panel">
-        <div className="j-card-head">
-          <div>
-            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-muted)" }}>
-              {selectedDay === today ? "Hoy" : ""}
-            </div>
-            <h3 className="serif" style={{ fontSize: 22, lineHeight: 1.1, marginTop: 2, textTransform: "capitalize", fontWeight: 400 }}>
-              {formatLongDate(selectedDay)}
-            </h3>
-          </div>
-          <div style={{ display: "flex", gap: 24, alignItems: "center" }}>
-            <div>
-              <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-muted)" }}>Citas</div>
-              <div className="mono" style={{ fontSize: 18, fontWeight: 500 }}>{selectedAppointments.length}</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-muted)" }}>Pendientes</div>
-              <div className="mono" style={{ fontSize: 18, fontWeight: 500 }}>
-                {selectedAppointments.filter((a) => a.status === "pending").length}
-              </div>
-            </div>
-          </div>
-        </div>
-        <div className="j-card-body tight">
-          {selectedAppointments.length === 0 ? (
-            <div style={{ padding: 28 }}>
-              <JEmpty
-                compact
-                title="Día libre"
-                description="No hay citas agendadas este día."
-              />
-            </div>
-          ) : (
-            selectedAppointments.map((apt) => {
-              const client = clientById.get(apt.clientId);
-              const employee = employeeById.get(apt.employeeId);
-              return (
-                <div key={apt.id} className="j-search-row" onClick={() => onOpenAppointment(apt)}>
-                  <div className="mono" style={{ fontSize: 13, fontWeight: 500, color: "var(--fg)", width: 60 }}>
-                    {apt.time}
-                    <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", fontWeight: 400, marginTop: 2 }}>{apt.duration}m</div>
-                  </div>
-                  <div className="j-avatar">{initialsFromName(client?.name ?? "?")}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 500, fontSize: 13.5, color: "var(--fg)" }}>
-                      {client?.name ?? "Cliente eliminado"}
-                    </div>
-                    <div style={{ fontSize: 12, color: "var(--fg-muted)", marginTop: 2 }}>
-                      {apt.service} · {employee?.name ?? "—"}
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
-                    <StatusBadge status={apt.status} />
-                    <span className="mono" style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-                      {formatCurrency(apt.price, "MXN")}
-                    </span>
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-      </div>
-    </>
-  );
-}
-
-// ─── Dashboard ────────────────────────────────────────────────────────────────
-
-function Dashboard({
-  state,
-  role,
-  activeEmployeeId,
-  today,
-  monthlyChange,
-  onComplete,
-  clientById,
-  employeeById,
-  onOpenAppointment
-}: {
-  state: AppState;
-  role: Role;
-  activeEmployeeId: string;
-  today: string;
-  monthlyChange: number;
-  onComplete: (id: string, status: Appointment["status"]) => void;
-  clientById: Map<string, Client>;
-  employeeById: Map<string, AppState["employees"][number]>;
-  onOpenAppointment: (appointment: Appointment) => void;
-}) {
-  const appointments = role === "employee"
-    ? state.appointments.filter((a) => a.employeeId === activeEmployeeId)
-    : state.appointments;
-  const currency = state.config.currency;
-  const currentDate = new Date(`${today}T12:00:00`);
-  const monthRevenue = revenueForMonth(appointments, currentDate.getFullYear(), currentDate.getMonth());
-  const weekRevenue = revenueForCurrentWeek(appointments, today);
-  const dayRevenue = revenueForDay(appointments, today);
-  const todayCount = appointments.filter((a) => a.date === today).length;
-  const upcoming = upcomingAppointments(appointments, today);
-  const completedThisMonth = appointments.filter((a) =>
-    a.status === "completed" && a.date.startsWith(today.slice(0, 7))
-  ).length;
-  const cancelledThisMonth = appointments.filter((a) =>
-    a.status === "cancelled" && a.date.startsWith(today.slice(0, 7))
-  ).length;
-
-  return (
-    <>
-      {/* KPIs editorial */}
-      <div className="j-kpis">
-        <div className="j-kpi">
-          <div className="j-kpi-label">Ingresos de hoy</div>
-          <div className="j-kpi-value mono">{formatCurrency(dayRevenue, currency)}</div>
-          <div className="j-kpi-delta">
-            <span>{todayCount} cita{todayCount !== 1 ? "s" : ""} hoy</span>
-          </div>
-        </div>
-        <div className="j-kpi">
-          <div className="j-kpi-label">Ingresos semana</div>
-          <div className="j-kpi-value mono">{formatCurrency(weekRevenue, currency)}</div>
-          <div className="j-kpi-delta"><span>Semana operativa actual</span></div>
-        </div>
-        <div className="j-kpi">
-          <div className="j-kpi-label">Ingresos del mes</div>
-          <div className="j-kpi-value mono">{formatCurrency(monthRevenue, currency)}</div>
-          <div className={"j-kpi-delta " + (monthlyChange >= 0 ? "up" : "down")}>
-            <span>{monthlyChange >= 0 ? "+" : ""}{monthlyChange}%</span>
-            <span className="vs">vs mes anterior</span>
-          </div>
-        </div>
-        <div className="j-kpi">
-          <div className="j-kpi-label">Total de citas</div>
-          <div className="j-kpi-value mono">{appointments.length}</div>
-          <div className="j-kpi-delta">
-            <span>{state.clients.length} clientes registrados</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Gráfica + próximas citas */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.9fr", gap: 20, marginBottom: 20 }} className="j-dash-row">
-        <section className="j-card">
-          <div className="j-card-head">
-            <h3>Ingresos por día</h3>
-            <span className="sub">— últimos 7 días</span>
-          </div>
-          <div className="j-card-body">
-            <Suspense fallback={<div style={{ height: 220 }} />}>
-              <RevenueChart data={dailyRevenueSeries(appointments)} />
-            </Suspense>
-          </div>
-        </section>
-
-        <section className="j-card">
-          <div className="j-card-head">
-            <h3>Próximas citas</h3>
-            {upcoming.length > 0 && <span className="sub">— {upcoming.length}</span>}
-          </div>
-          <div className="j-card-body tight">
-            {upcoming.length === 0 ? (
-              <div style={{ padding: 28 }}>
-                <JEmpty
-                  compact
-                  title="Día libre"
-                  description="Sin citas próximas programadas."
-                />
-              </div>
-            ) : (
-              upcoming.map((apt) => (
-                <div key={apt.id} className="j-search-row" onClick={() => onOpenAppointment(apt)}>
-                  <div className="mono" style={{ fontSize: 12, color: "var(--fg-muted)", width: 50 }}>{apt.time}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontWeight: 500, fontSize: 13, color: "var(--fg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {clientById.get(apt.clientId)?.name ?? "Cliente eliminado"}
-                    </div>
-                    <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginTop: 2 }}>
-                      {apt.service} · {formatDate(apt.date)} · {employeeById.get(apt.employeeId)?.name ?? "—"}
-                    </div>
-                  </div>
-                  <StatusBadge status={apt.status} />
-                  {role === "employee" && apt.status !== "completed" && (
-                    <button className="j-btn j-btn-sm" onClick={(event) => { event.stopPropagation(); onComplete(apt.id, "completed"); }}>
-                      <Check size={12} strokeWidth={2.25} />
-                    </button>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        </section>
-      </div>
-
-      {/* Semana actual + completadas vs canceladas */}
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.9fr", gap: 20, marginBottom: 20 }} className="j-dash-row">
-        <WeeklyView appointments={appointments} clientById={clientById} today={today} onOpen={onOpenAppointment} />
-
-        <section className="j-card">
-          <div className="j-card-head">
-            <h3>Citas del mes</h3>
-            <span className="sub">— completadas vs canceladas</span>
-          </div>
-          <div className="j-card-body">
-            <div style={{ display: "flex", gap: 24, alignItems: "center" }}>
-              <div style={{ flex: 1 }}>
-                <div className="serif" style={{ fontSize: 42, lineHeight: 1, letterSpacing: "-0.02em", color: "var(--fg)" }}>
-                  {completedThisMonth + cancelledThisMonth > 0
-                    ? Math.round((completedThisMonth / (completedThisMonth + cancelledThisMonth)) * 100)
-                    : 0}%
-                </div>
-                <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-muted)", marginTop: 6 }}>
-                  Tasa completada
-                </div>
-              </div>
-              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border)", paddingBottom: 8 }}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
-                    <span style={{ width: 9, height: 9, background: "var(--fg)", borderRadius: 2 }} />
-                    Completadas
-                  </span>
-                  <span className="mono" style={{ fontWeight: 500 }}>{completedThisMonth}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
-                    <span style={{ width: 9, height: 9, background: "var(--fg-subtle)", borderRadius: 2 }} />
-                    Canceladas
-                  </span>
-                  <span className="mono" style={{ fontWeight: 500 }}>{cancelledThisMonth}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-      </div>
-    </>
-  );
-}
-
-function WeeklyView({
-  appointments,
-  clientById,
-  today,
-  onOpen
-}: {
-  appointments: Appointment[];
-  clientById: Map<string, Client>;
-  today: string;
-  onOpen?: (a: Appointment) => void;
-}) {
-  const currentDate = new Date(`${today}T12:00:00`);
-  const dayOfWeek = currentDate.getDay();
-  const startOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-  const days = Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(currentDate);
-    d.setDate(currentDate.getDate() + startOffset + i);
-    return d.toISOString().slice(0, 10);
-  });
-
-  return (
-    <section className="j-card">
-      <div className="j-card-head">
-        <h3>Semana actual</h3>
-        <span className="sub">— vista rápida</span>
-      </div>
-      <div className="j-card-body">
-        <div className="j-week-grid">
-          {days.map((day) => {
-            const isToday = day === today;
-            const dayApts = appointments.filter((a) => a.date === day).sort((a, b) => a.time.localeCompare(b.time));
-            return (
-              <div key={day} className={"j-week-day" + (isToday ? " today" : "")}>
-                <div className="j-week-day-head">{formatDate(day)}</div>
-                <div className="j-week-day-body">
-                  {dayApts.length === 0 ? (
-                    <div className="j-week-day-empty">Libre</div>
-                  ) : (
-                    dayApts.slice(0, 3).map((apt) => (
-                      <div key={apt.id}
-                           className={"j-week-apt status-" + apt.status}
-                           onClick={() => onOpen?.(apt)}>
-                        <div className="mono" style={{ fontSize: 11, fontWeight: 500 }}>{apt.time}</div>
-                        <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {clientById.get(apt.clientId)?.name ?? "Cliente"}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                  {dayApts.length > 3 && (
-                    <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", marginTop: 4 }}>
-                      +{dayApts.length - 3} más
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 // ─── Appointments View ────────────────────────────────────────────────────────
 
-// ─── Estados de cita (P3/P6) ──────────────────────────────────────────────────
-// El `source` distingue reserva web (public_site) de cita normal (dashboard) y no
-// cambia. Lo que cambia es el `status`. Etiquetas y opciones dependen del contexto.
-
-function appointmentStatusLabel(apt: Appointment): string {
-  if (apt.source === "public_site" && apt.status === "pending") return "Por confirmar";
-  switch (apt.status) {
-    case "pending": return "Pendiente";
-    case "confirmed": return "Confirmada";
-    case "completed": return "Completada";
-    case "cancelled": return "Cancelada";
-    default: return "No asistió";
-  }
-}
-
-// 3 estados visibles según el ciclo de vida (P6: botones grandes, sin dropdowns):
-//   · reserva web por confirmar → Por confirmar / Confirmada / Cancelada
-//   · cita confirmada (ex-reserva) → Confirmada / Completada / Cancelada
-//   · cita normal               → Pendiente / Completada / Cancelada
-function appointmentStatusChoices(apt: Appointment): { value: AppointmentStatus; label: string }[] {
-  if (apt.source === "public_site" && apt.status === "pending") {
-    return [
-      { value: "pending", label: "Por confirmar" },
-      { value: "confirmed", label: "Confirmada" },
-      { value: "cancelled", label: "Cancelada" }
-    ];
-  }
-  if (apt.status === "confirmed") {
-    return [
-      { value: "confirmed", label: "Confirmada" },
-      { value: "completed", label: "Completada" },
-      { value: "cancelled", label: "Cancelada" }
-    ];
-  }
-  return [
-    { value: "pending", label: "Pendiente" },
-    { value: "completed", label: "Completada" },
-    { value: "cancelled", label: "Cancelada" }
-  ];
-}
-
-function AppointmentsView({ state, filters, setFilters, appointments, clientById, employeeById, onAdd, onOpen, onOpenClient, exportCsv }: {
+function AppointmentsView({ state, filters, setFilters, appointments, clientById, employeeById, onAdd, onOpen, onOpenClient, exportExcel }: {
   state: AppState; filters: AppointmentFilters; setFilters: (f: AppointmentFilters) => void; appointments: Appointment[];
   clientById: Map<string, Client>; employeeById: Map<string, AppState["employees"][number]>;
   onAdd: () => void;
-  onOpen: (a: Appointment) => void; onOpenClient: (client: Client) => void; exportCsv: () => void;
+  onOpen: (a: Appointment) => void; onOpenClient: (client: Client) => void; exportExcel: () => void;
 }) {
   const currency = state.config.currency;
   return (
@@ -1664,7 +1194,7 @@ function AppointmentsView({ state, filters, setFilters, appointments, clientById
           <option value="client">Nombre del cliente</option>
         </select>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <button className="j-btn j-btn-sm" onClick={exportCsv}><Download size={12} /> CSV</button>
+          <button className="j-btn j-btn-sm" onClick={exportExcel}><Download size={12} /> Exportar</button>
           <button className="j-btn j-btn-sm j-btn-primary" onClick={onAdd}>
             <Plus size={12} strokeWidth={2.25} /> Nueva cita
           </button>
@@ -1761,6 +1291,17 @@ function AppointmentsView({ state, filters, setFilters, appointments, clientById
 
 function EmployeesView({ performance, currency }: { performance: ReturnType<typeof employeePerformance>; currency: string }) {
   const maxRev = Math.max(...performance.map((e) => e.revenue), 1);
+  const exportExcel = () => {
+    downloadExcel("rendimiento-empleados", "Rendimiento de empleados", performance.map((emp) => ({
+      Empleado: emp.name,
+      Puesto: emp.position,
+      Citas: emp.assignedCount,
+      Completadas: emp.completedCount,
+      Ingresos: emp.revenue,
+      Ocupación: `${Math.round((emp.revenue / maxRev) * 100)}%`,
+      Estado: emp.status
+    })));
+  };
 
   if (performance.length === 0) {
     return (
@@ -1776,6 +1317,9 @@ function EmployeesView({ performance, currency }: { performance: ReturnType<type
       <div className="j-card-head">
         <h3>Equipo</h3>
         <span className="sub">— rendimiento del mes</span>
+        <button className="j-btn j-btn-sm" onClick={exportExcel} style={{ marginLeft: "auto" }}>
+          <Download size={12} /> Exportar
+        </button>
       </div>
       <div style={{ overflowX: "auto" }}>
         <table className="j-table">
@@ -1824,132 +1368,6 @@ function EmployeesView({ performance, currency }: { performance: ReturnType<type
   );
 }
 
-// P4/P6: ventana de detalle CENTRADA (mismo patrón j-modal que Proveedores/Catálogo).
-// Todas las acciones de la cita (estado, pago, WhatsApp, editar, eliminar) viven aquí
-// como botones grandes; ya no hay edición rápida desde la tabla.
-function AppointmentDetailModal({
-  appointment,
-  client,
-  employee,
-  currency,
-  role,
-  onClose,
-  onEdit,
-  onStatus,
-  onPayment,
-  onWhatsApp,
-  onDelete
-}: {
-  appointment: Appointment;
-  client?: Client;
-  employee?: AppState["employees"][number];
-  currency: string;
-  role: Role;
-  onClose: () => void;
-  onEdit: (appointment: Appointment) => void;
-  onStatus: (status: AppointmentStatus) => void;
-  onPayment: (status: PaymentStatus) => void;
-  onWhatsApp: () => void;
-  onDelete: (id: string) => void;
-}) {
-  const isPendingWeb = appointment.source === "public_site" && appointment.status === "pending";
-  const statusChoices = appointmentStatusChoices(appointment);
-  return (
-    <div className="j-modal-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="j-modal">
-        <div className="j-modal-head">
-          <div>
-            <p className="mono" style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--fg-muted)", margin: 0 }}>
-              {isPendingWeb ? "Reservación web · " : ""}{formatDate(appointment.date)} · {appointment.time}
-            </p>
-            <h2 style={{ margin: "2px 0 0" }}>{client?.name ?? "Cliente eliminado"}</h2>
-          </div>
-          <button className="j-btn-ghost" onClick={onClose} aria-label="Cerrar" style={{ padding: 6 }}><X size={16} /></button>
-        </div>
-        <div className="j-modal-body">
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-            <StatusBadge status={appointment.status} />
-            <PaymentBadge status={appointment.paymentStatus} />
-          </div>
-
-          <div className="grid gap-3" style={{ gridTemplateColumns: "1fr 1fr", display: "grid", marginBottom: 16 }}>
-            <Metric label="Servicio" value={appointment.service} />
-            <Metric label="Empleado" value={employee?.name ?? "—"} />
-            <Metric label="Teléfono" value={client?.phone ? formatPhoneDisplay(client.phone) : "Sin teléfono"} />
-            <Metric label="Duración" value={`${appointment.duration} min`} />
-            <Metric label="Precio" value={formatCurrency(appointment.price, currency)} />
-            <Metric label="Pagado" value={formatCurrency(appointment.paidAmount, currency)} />
-          </div>
-
-          {appointment.notes && (
-            <div className="j-field" style={{ marginBottom: 16 }}>
-              <span className="j-field-label">Notas</span>
-              <p style={{ margin: 0, fontSize: 13, color: "var(--fg-muted)" }}>{appointment.notes}</p>
-            </div>
-          )}
-
-          {/* P6: estado con botones grandes (sin dropdowns) */}
-          <div className="j-field" style={{ marginBottom: 16 }}>
-            <span className="j-field-label">Estado de la cita</span>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {statusChoices.map((choice) => (
-                <button
-                  key={choice.value}
-                  type="button"
-                  className={"j-btn" + (appointment.status === choice.value ? " j-btn-primary" : "")}
-                  style={{ flex: 1, minWidth: 110, justifyContent: "center" }}
-                  onClick={() => appointment.status !== choice.value && onStatus(choice.value)}
-                >
-                  {choice.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* P6: pago con botones grandes (solo desde el detalle) */}
-          <div className="j-field">
-            <span className="j-field-label">Estado de pago</span>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                type="button"
-                className={"j-btn" + (appointment.paymentStatus === "none" ? " j-btn-primary" : "")}
-                style={{ flex: 1, justifyContent: "center" }}
-                onClick={() => appointment.paymentStatus !== "none" && onPayment("none")}
-              >
-                Sin pago
-              </button>
-              <button
-                type="button"
-                className={"j-btn" + (appointment.paymentStatus === "paid" ? " j-btn-primary" : "")}
-                style={{ flex: 1, justifyContent: "center" }}
-                onClick={() => appointment.paymentStatus !== "paid" && onPayment("paid")}
-              >
-                <CreditCard size={14} /> Pagado
-              </button>
-            </div>
-          </div>
-        </div>
-        <div className="j-modal-foot" style={{ flexWrap: "wrap", gap: 8 }}>
-          {role === "admin" && (
-            <button className="j-btn" onClick={() => onDelete(appointment.id)} style={{ color: "var(--neg)" }}>
-              <Trash2 size={15} /> Eliminar
-            </button>
-          )}
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button className="j-btn" onClick={() => onEdit(appointment)}><Pencil size={15} /> Editar</button>
-            {/* El botón de WhatsApp SOLO contacta (abre wa.me); NO confirma la cita.
-                La confirmación es manual con los botones de "Estado de la cita" de
-                arriba, para no confirmar por error al solo contactar al cliente. */}
-            <button className={"j-btn" + (isPendingWeb ? " j-btn-primary" : "")} onClick={onWhatsApp}>
-              <MessageCircle size={15} /> Contactar por WhatsApp
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function EmployeeSettings({ activeEmployee }: { activeEmployee: AppState["employees"][number] }) {
   return (
     <section className="card max-w-md p-6">
@@ -1961,385 +1379,5 @@ function EmployeeSettings({ activeEmployee }: { activeEmployee: AppState["employ
       </div>
       <p className="mt-4 text-xs text-slate-400">Para cambios en tu perfil, contacta al administrador del sistema.</p>
     </section>
-  );
-}
-
-// ─── Shared helpers ───────────────────────────────────────────────────────────
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg bg-slate-50 p-3">
-      <p className="text-xs font-medium text-slate-500">{label}</p>
-      <p className="mt-0.5 text-sm font-semibold text-slate-950">{value}</p>
-    </div>
-  );
-}
-
-// ─── Editorial: Full-screen Nueva cita ────────────────────────────────────────
-
-function initialsFor(name: string) {
-  const parts = (name || "").trim().split(/\s+/);
-  return ((parts[0]?.[0] || "?") + (parts[1]?.[0] || "")).toUpperCase();
-}
-
-function NewAppointmentFullScreen({
-  draft,
-  isNew,
-  state,
-  appointments,
-  onChange,
-  onSave,
-  onClose,
-  onCreateClient
-}: {
-  draft: Appointment;
-  isNew: boolean;
-  state: AppState;
-  appointments: Appointment[];
-  onChange: (next: Appointment) => void;
-  onSave: () => void;
-  onClose: () => void;
-  onCreateClient: (name: string, phone: string) => Client;
-}) {
-  const [step, setStep] = useState<0 | 1>(() => (draft.clientId ? 1 : 0));
-  const [query, setQuery] = useState("");
-  const [newClientName, setNewClientName] = useState("");
-  const [newClientPhone, setNewClientPhone] = useState("");
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const services = state.config.services;
-  const employees = state.employees.filter((employee) => employee.status !== "inactive");
-  const clients = state.clients;
-  const currency = state.config.currency;
-
-  const selectedClient = clients.find((c) => c.id === draft.clientId);
-  const selectedService = services.find((s) => s.name === draft.service) ?? services[0];
-  const selectedEmployee = employees.find((e) => e.id === draft.employeeId);
-
-  const matches = query
-    ? clients.filter(
-        (c) =>
-          c.name.toLowerCase().includes(query.toLowerCase()) ||
-          (c.phone || "").includes(query)
-      )
-    : clients.slice(0, 8);
-
-  const availableSlots = selectedService && draft.employeeId
-    ? getAvailableSlots(state.config, appointments.filter((a) => a.id !== draft.id), selectedService, draft.date, draft.employeeId)
-    : [];
-  const isCurrentTimeAvailable = !!draft.time && availableSlots.includes(draft.time);
-
-  useEffect(() => {
-    if (draft.time && draft.employeeId && availableSlots.length > 0 && !availableSlots.includes(draft.time)) {
-      onChange({ ...draft, time: "" });
-    }
-  }, [availableSlots.join("|"), draft.employeeId, draft.time]);
-
-  const selectClient = (client: Client) => {
-    onChange({ ...draft, clientId: client.id });
-    setStep(1);
-  };
-
-  const selectNewClient = () => {
-    if (!newClientName.trim()) return;
-    const created = onCreateClient(newClientName.trim(), newClientPhone.trim());
-    onChange({ ...draft, clientId: created.id });
-    setNewClientName("");
-    setNewClientPhone("");
-    setStep(1);
-  };
-
-  const setService = (s: ServiceItem) => {
-    onChange({
-      ...draft,
-      service: s.name,
-      price: s.basePrice,
-      duration: s.duration,
-      depositAmount: s.depositAmount
-    });
-  };
-
-  return (
-    <div className="j-fm" role="dialog" aria-modal="true">
-      <div className="j-fm-head">
-        <button className="j-btn-ghost" onClick={onClose} aria-label="Cerrar" style={{ padding: 8 }}>
-          <X size={18} />
-        </button>
-        <h1>
-          {isNew ? "Nueva" : "Editar"} <span className="accent">cita</span>
-        </h1>
-        <div className="j-fm-steps">
-          <span className={"s " + (step >= 0 ? "on" : "")}>Cliente</span>
-          <span className="sep" />
-          <span className={"s " + (step >= 1 ? "on" : "")}>Servicio</span>
-        </div>
-        <div style={{ marginLeft: "auto" }}>
-          <span className="mono" style={{ fontSize: 11.5, color: "var(--fg-muted)" }}>
-            {state.config.businessName}
-          </span>
-        </div>
-      </div>
-
-      <div className="j-fm-body">
-        <div className="j-fm-form">
-          {step === 0 && (
-            <>
-              <div>
-                <div className="serif" style={{ fontSize: 26, letterSpacing: "-0.01em", color: "var(--fg)" }}>
-                  ¿Para qué <i>cliente</i>?
-                </div>
-                <div style={{ fontSize: 13, marginTop: 4, color: "var(--fg-muted)" }}>
-                  Busca por nombre o teléfono, o crea uno nuevo.
-                </div>
-              </div>
-
-              <div className="j-field">
-                <div className="j-input" style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px" }}>
-                  <Search size={15} />
-                  <input
-                    style={{ border: "none", outline: "none", flex: 1, background: "transparent", color: "var(--fg)", fontSize: 14 }}
-                    placeholder="Buscar clientes…"
-                    autoFocus
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                  />
-                </div>
-              </div>
-
-              <div className="j-search-list">
-                {matches.length === 0 && (
-                  <div style={{ padding: 24, textAlign: "center", color: "var(--fg-subtle)", fontSize: 13 }}>
-                    Sin coincidencias. Crea un cliente nuevo abajo.
-                  </div>
-                )}
-                {matches.map((c) => (
-                  <div key={c.id} className="j-search-row" onClick={() => selectClient(c)}>
-                    <div className="j-avatar">{initialsFor(c.name)}</div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 14, fontWeight: 500, color: "var(--fg)" }}>{c.name}</div>
-                      <div className="mono" style={{ fontSize: 11.5, marginTop: 2, color: "var(--fg-muted)" }}>
-                        {c.phone || "—"} {c.email ? `· ${c.email}` : ""}
-                      </div>
-                    </div>
-                    <ChevronRight size={14} />
-                  </div>
-                ))}
-
-                <div className="j-search-row new" style={{ flexDirection: "column", alignItems: "stretch", gap: 8 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <div className="j-avatar" style={{ borderStyle: "dashed" }}>
-                      <Plus size={14} />
-                    </div>
-                    <div style={{ fontSize: 13, fontWeight: 500, color: "var(--fg)" }}>Crear nuevo cliente</div>
-                  </div>
-                  <div style={{ display: "grid", gap: 8 }}>
-                    <input
-                      className="j-input"
-                      placeholder="Nombre completo"
-                      value={newClientName}
-                      onChange={(e) => setNewClientName(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") selectNewClient(); }}
-                    />
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <div style={{ flex: 1 }}>
-                        <PhoneInput value={newClientPhone} onChange={setNewClientPhone} />
-                      </div>
-                      <button className="j-btn j-btn-primary" onClick={selectNewClient} disabled={!newClientName.trim()}>
-                        Crear
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
-
-          {step >= 1 && selectedClient && (
-            <>
-              <div style={{ display: "flex", gap: 14, padding: "12px 16px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-elev)", alignItems: "center" }}>
-                <div className="j-avatar" style={{ width: 42, height: 42, fontSize: 14 }}>
-                  {initialsFor(selectedClient.name)}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 500, fontSize: 14.5, color: "var(--fg)" }}>{selectedClient.name}</div>
-                  <div className="mono" style={{ fontSize: 12, marginTop: 2, color: "var(--fg-muted)" }}>
-                    {selectedClient.phone || "—"} {selectedClient.email ? `· ${selectedClient.email}` : ""}
-                  </div>
-                </div>
-                <button className="j-btn j-btn-sm" onClick={() => setStep(0)}>Cambiar</button>
-              </div>
-
-              <div className="j-recommend">
-                <div className="rh">
-                  <Sparkles size={14} />
-                  <span className="serif">Sugerencia de Jack</span>
-                </div>
-                <span style={{ color: "var(--fg-muted)" }}>
-                  Servicio habitual: <b style={{ color: "var(--fg)" }}>{selectedClient.requestedService || services[0]?.name || "—"}</b>.
-                </span>
-              </div>
-
-              <div className="j-field">
-                <div className="j-field-label">Servicio</div>
-                <div className="j-chips">
-                  {services.map((s) => (
-                    <span
-                      key={s.id}
-                      className={"j-chip " + (draft.service === s.name ? "on" : "")}
-                      onClick={() => setService(s)}
-                    >
-                      {s.name}
-                      <span className="j-chip-meta">
-                        {s.duration}min · {formatCurrency(s.basePrice, currency)}
-                      </span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <div className="j-field">
-                <div className="j-field-label">Empleado</div>
-                <div className="j-chips">
-                  {employees.map((e) => (
-                    <span
-                      key={e.id}
-                      className={"j-chip " + (draft.employeeId === e.id ? "on" : "")}
-                      onClick={() => onChange({ ...draft, employeeId: e.id, time: "" })}
-                    >
-                      {e.name}
-                    </span>
-                  ))}
-                </div>
-                {employees.length === 0 && (
-                  <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-                    Agrega al menos un empleado activo para poder confirmar citas.
-                  </div>
-                )}
-              </div>
-
-              <div className="j-field">
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
-                  <div className="j-field-label" style={{ margin: 0 }}>Fecha y hora</div>
-                  <span className="mono" style={{ fontSize: 11.5, color: "var(--fg-muted)" }}>
-                    {draft.duration} min
-                  </span>
-                </div>
-                <input
-                  type="date"
-                  className="j-input"
-                  style={{ marginBottom: 8 }}
-                  value={draft.date}
-                  onChange={(e) => onChange({ ...draft, date: e.target.value })}
-                />
-                {availableSlots.length === 0 ? (
-                  <div className="j-empty compact" style={{ alignItems: "flex-start", textAlign: "left", padding: 18 }}>
-                    <div className="j-empty-title">Sin horarios disponibles</div>
-                    <div className="j-empty-desc">
-                      Revisa el horario del negocio, el empleado seleccionado o las citas ya ocupadas.
-                    </div>
-                  </div>
-                ) : (
-                  <div className="j-slots large">
-                    {availableSlots.map((t) => (
-                      <div
-                        key={t}
-                        className={"j-slot " + (draft.time === t ? "on" : "")}
-                        onClick={() => onChange({ ...draft, time: t })}
-                      >
-                        {t}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="j-field">
-                <div className="j-field-label">Notas (opcional)</div>
-                <textarea
-                  className="j-input"
-                  rows={3}
-                  value={draft.notes ?? ""}
-                  onChange={(e) => onChange({ ...draft, notes: e.target.value })}
-                  placeholder="Alguna preferencia, alergia o nota para el empleado…"
-                />
-              </div>
-            </>
-          )}
-        </div>
-
-        <aside className="j-fm-aside">
-          <div className="j-fm-summary">
-            <h3>Resumen</h3>
-            {!selectedClient ? (
-              <div style={{ padding: "16px 0", textAlign: "center", color: "var(--fg-subtle)" }}>
-                <div className="serif" style={{ fontSize: 18, fontStyle: "italic", marginBottom: 6 }}>
-                  Sin datos aún
-                </div>
-                <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-                  Elige un cliente para empezar
-                </div>
-              </div>
-            ) : (
-              <>
-                <div style={{ marginBottom: 14 }}>
-                  <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--fg-muted)", marginBottom: 4 }}>
-                    Cliente
-                  </div>
-                  <div className="big">{selectedClient.name}</div>
-                  {selectedClient.phone && (
-                    <div className="mono" style={{ fontSize: 11.5, marginTop: 4, color: "var(--fg-muted)" }}>
-                      {selectedClient.phone}
-                    </div>
-                  )}
-                </div>
-                <div className="j-fm-summary-row"><span className="l">Servicio</span><span className="v">{selectedService?.name ?? "—"}</span></div>
-                <div className="j-fm-summary-row"><span className="l">Duración</span><span className="v mono">{draft.duration} min</span></div>
-                <div className="j-fm-summary-row"><span className="l">Empleado</span><span className="v">{selectedEmployee?.name ?? "—"}</span></div>
-                <div className="j-fm-summary-row"><span className="l">Fecha</span><span className="v mono">{draft.date}</span></div>
-                <div className="j-fm-summary-row"><span className="l">Hora</span><span className="v mono">{draft.time}</span></div>
-                {(draft.depositAmount ?? 0) > 0 && (
-                  <div className="j-fm-summary-row"><span className="l">Anticipo</span><span className="v mono">{formatCurrency(draft.depositAmount, currency)}</span></div>
-                )}
-                <div className="j-fm-summary-row total">
-                  <span>Total</span>
-                  <span className="mono">{formatCurrency(draft.price, currency)}</span>
-                </div>
-              </>
-            )}
-          </div>
-
-          {selectedClient && (
-            <div style={{ marginTop: 18, padding: "14px 16px", border: "1px dashed var(--border-strong)", borderRadius: 8, background: "var(--bg-elev)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, fontSize: 12, color: "var(--fg)" }}>
-                <Sparkles size={13} />
-                <b>Jack sugiere</b>
-              </div>
-              <div style={{ fontSize: 12, lineHeight: 1.55, color: "var(--fg-muted)" }}>
-                Se enviará un recordatorio automático al cliente cuando confirme la cita.
-              </div>
-            </div>
-          )}
-        </aside>
-      </div>
-
-      <div className="j-fm-foot">
-        <div className="left">Pulsa Esc para cerrar</div>
-        <button className="j-btn" onClick={onClose}>Cancelar</button>
-        {step === 0 ? (
-          <button className="j-btn j-btn-primary" disabled style={{ opacity: 0.4, cursor: "not-allowed" }}>
-            Continuar
-          </button>
-        ) : (
-          <button className="j-btn j-btn-primary" onClick={onSave} disabled={!selectedClient || !draft.service || !draft.date || !draft.time || !isCurrentTimeAvailable}>
-            <Check size={13} strokeWidth={2.25} /> {isNew ? "Confirmar cita" : "Guardar cambios"}
-          </button>
-        )}
-      </div>
-    </div>
   );
 }

@@ -1,4 +1,4 @@
-import type { Appointment, Client, Employee } from "../types";
+import type { Appointment, Client, Employee, Sale } from "../types";
 
 const toDate = (value: string) => new Date(`${value}T12:00:00`);
 
@@ -6,6 +6,38 @@ export const completedRevenue = (appointments: Appointment[]) =>
   appointments
     .filter((a) => a.paymentStatus === "paid")
     .reduce((sum, a) => sum + (a.paidAmount || a.price), 0);
+
+// ── Ventas de productos ───────────────────────────────────────────────────────
+// Mismas ventanas de tiempo que los ingresos de citas, para que dashboard/
+// estadísticas sumen ambos sin duplicar lógica de fechas.
+
+export const salesRevenue = (sales: Sale[]) => sales.reduce((sum, s) => sum + s.total, 0);
+
+export const salesForDay = (sales: Sale[], date: string) =>
+  salesRevenue(sales.filter((s) => s.date === date));
+
+export const salesForMonth = (sales: Sale[], year: number, monthIndex: number) =>
+  salesRevenue(
+    sales.filter((s) => {
+      const d = toDate(s.date);
+      return d.getFullYear() === year && d.getMonth() === monthIndex;
+    }),
+  );
+
+export const salesForCurrentWeek = (sales: Sale[], today: string) => {
+  const current = toDate(today);
+  const day = current.getDay() || 7;
+  const monday = new Date(current);
+  monday.setDate(current.getDate() - day + 1);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  return salesRevenue(
+    sales.filter((s) => {
+      const d = toDate(s.date);
+      return d >= monday && d <= sunday;
+    }),
+  );
+};
 
 export const revenueForDay = (appointments: Appointment[], date: string) =>
   completedRevenue(appointments.filter((a) => a.date === date));
@@ -39,7 +71,7 @@ export const upcomingAppointments = (appointments: Appointment[], today: string)
     .sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`))
     .slice(0, 6);
 
-export const dailyRevenueSeries = (appointments: Appointment[]) => {
+export const dailyRevenueSeries = (appointments: Appointment[], sales: Sale[] = []) => {
   const todayStr = new Date().toISOString().slice(0, 10);
   const today = new Date(`${todayStr}T12:00:00`);
   const DAY_ABBR = ["Do", "Lu", "Ma", "Mi", "Ju", "Vi", "Sa"];
@@ -49,7 +81,7 @@ export const dailyRevenueSeries = (appointments: Appointment[]) => {
     const dateStr = d.toISOString().slice(0, 10);
     return {
       name: `${DAY_ABBR[d.getDay()]} ${d.getDate()}`,
-      ingresos: revenueForDay(appointments, dateStr)
+      ingresos: revenueForDay(appointments, dateStr) + salesForDay(sales, dateStr)
     };
   });
 };

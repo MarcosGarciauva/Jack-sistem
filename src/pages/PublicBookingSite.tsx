@@ -66,7 +66,7 @@ function PublicNotFound({ slug }: { slug: string }) {
           {slug} · sitio no disponible
         </div>
         <h1 className="serif" style={{ fontSize: 48, lineHeight: 1.1, margin: 0, color: "#fff" }}>
-          Este sitio público <i>no está activo</i>.
+          Este sitio público no está activo.
         </h1>
         <p style={{ marginTop: 14, fontSize: 14, color: "rgba(255,255,255,0.7)", maxWidth: 520, lineHeight: 1.55 }}>
           El negocio que buscas no tiene su paquete de sitio público activo, o el enlace no es correcto. Si crees que es un error, contacta directamente al negocio.
@@ -202,7 +202,7 @@ function PublicLanding({ biz }: { biz: PublicBusinessSummary }) {
             {biz.name}
           </div>
           <h1 className="serif" style={{ fontSize: 48, lineHeight: 1.1, margin: 0, color: "#fff" }}>
-            Reserva <i>confirmada</i>
+            Reserva confirmada
           </h1>
         </div>
         <div className="j-pub-body">
@@ -211,7 +211,7 @@ function PublicLanding({ biz }: { biz: PublicBusinessSummary }) {
               <Check size={28} />
             </div>
             <div className="serif" style={{ fontSize: 24, lineHeight: 1.2, marginBottom: 10 }}>
-              Te esperamos el <i>{formatLongDate(confirmed.date)}</i> a las {confirmed.time}
+              Te esperamos el <strong>{formatLongDate(confirmed.date)}</strong> a las <strong>{confirmed.time}</strong>
             </div>
             <p style={{ fontSize: 13, color: "var(--fg-muted)", lineHeight: 1.55, marginBottom: 18 }}>
               Reservaste <b style={{ color: "var(--fg)" }}>{confirmed.service}</b> en {biz.name}. El negocio te confirmará la cita por teléfono.
@@ -436,6 +436,10 @@ function PublicFooter() {
   return (
     <footer className="j-pub-footer">
       <span className="mono">Powered by Jack</span>
+      <span style={{ display: "inline-flex", gap: 10, marginLeft: 14, fontSize: 11 }}>
+        <a href="/terminos" style={{ color: "var(--fg-subtle)" }}>Términos</a>
+        <a href="/privacidad" style={{ color: "var(--fg-subtle)" }}>Privacidad</a>
+      </span>
       <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--fg-subtle)" }}>
         © {new Date().getFullYear()}
       </span>

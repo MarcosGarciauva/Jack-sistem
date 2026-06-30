@@ -9,6 +9,7 @@
 //   action = "update_employee"        (admin / super_admin del negocio)
 //   action = "delete_employee"        (admin / super_admin del negocio)
 //   action = "create_business_admin"  (solo super_admin)
+//   action = "delete_business"        (solo super_admin; desactiva negocio + accesos)
 //   action = "complete_onboarding"    (admin del negocio, primer ingreso)
 //
 // Deploy: supabase functions deploy admin-manage-user
@@ -346,7 +347,55 @@ serve(async (req: Request) => {
       return json({ success: true, business: { id: biz.id, name: biz.name, slug: biz.slug } });
     }
 
-    // ── 6. Completar onboarding inicial (admin del negocio) ───────────────────
+    // ── 6. Eliminar negocio de forma segura (solo super_admin) ───────────────
+    if (action === "delete_business") {
+      if (!isSuperAdmin) return json({ error: "Solo el super admin puede eliminar negocios" }, 403);
+
+      const businessId = String(body.businessId ?? "").trim();
+      if (!businessId) return json({ error: "Negocio no especificado" }, 400);
+      if (callerProfile.business_id && callerProfile.business_id === businessId) {
+        return json({ error: "No puedes eliminar el negocio desde el que estás operando como super admin." }, 400);
+      }
+
+      const { data: business } = await admin
+        .from("businesses")
+        .select("id, name, active")
+        .eq("id", businessId)
+        .maybeSingle();
+      if (!business) return json({ error: "Negocio no encontrado" }, 404);
+
+      const now = new Date().toISOString();
+
+      // 1) Bloquear accesos del negocio. No borramos auth.users: puede haber usuarios
+      // ya eliminados manualmente en Supabase y no queremos que eso rompa la operación.
+      await admin
+        .from("profiles")
+        .update({ active: false })
+        .eq("business_id", businessId);
+
+      // 2) Marcar empleados como inactivos para que el panel refleje el estado si se
+      // reactiva o se consulta el histórico.
+      await admin
+        .from("business_employees")
+        .update({ status: "inactive", updated_at: now })
+        .eq("business_id", businessId);
+
+      // 3) Desactivar negocio y apagar reservas públicas. Es un archivo operativo,
+      // no un hard delete: conserva citas, clientes, caja y auditoría.
+      const { error: bizErr } = await admin
+        .from("businesses")
+        .update({
+          active: false,
+          public_site_enabled: false,
+          updated_at: now
+        })
+        .eq("id", businessId);
+      if (bizErr) return json({ error: "No se pudo eliminar el negocio: " + bizErr.message }, 500);
+
+      return json({ success: true, business: { id: business.id, name: business.name, active: false } });
+    }
+
+    // ── 7. Completar onboarding inicial (admin del negocio) ───────────────────
     if (action === "complete_onboarding") {
       if (!isAdmin) return json({ error: "Solo un administrador puede completar el onboarding" }, 403);
       const businessId = callerProfile.business_id;
