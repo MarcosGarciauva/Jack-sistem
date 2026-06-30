@@ -285,7 +285,8 @@ function DashboardApp() {
       setBusinessState(loadedBusiness);
     } catch (error) {
       void monitoringService.captureError(error, "auth.loadAuthenticatedUser");
-      setSetupMessage("No se pudo cargar tu perfil. Verifica que las tablas de Supabase existan y tengan permisos.");
+      const message = error instanceof Error ? error.message : String(error);
+      setSetupMessage(`No se pudo cargar tu perfil. Detalle técnico: ${message}`);
     } finally {
       setLoading(false);
     }
