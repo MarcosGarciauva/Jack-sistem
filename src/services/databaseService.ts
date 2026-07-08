@@ -937,6 +937,14 @@ export const databaseService = {
     await invokeAdminUser("delete_business", { businessId });
   },
 
+  async restoreBusiness(businessId: string): Promise<void> {
+    await invokeAdminUser("restore_business", { businessId });
+  },
+
+  async setManagedBusinessPublicSiteEnabled(businessId: string, enabled: boolean): Promise<void> {
+    await invokeAdminUser("set_business_public_site", { businessId, enabled });
+  },
+
   async createBusinessWithAdmin(input: {
     businessName: string;
     slug?: string;

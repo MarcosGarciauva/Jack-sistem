@@ -243,7 +243,13 @@ test("Super admin can safely delete businesses through the admin edge function",
   assert.match(adminPanel, /deleteBusiness/);
   assert.match(adminPanel, /Negocio eliminado de forma segura/);
   assert.match(service, /delete_business/);
+  assert.match(service, /restore_business/);
+  assert.match(service, /set_business_public_site/);
   assert.match(edge, /action === "delete_business"/);
+  assert.match(edge, /action === "restore_business"/);
+  assert.match(edge, /action === "set_business_public_site"/);
   assert.match(edge, /active: false/);
   assert.match(edge, /public_site_enabled: false/);
+  assert.match(adminPanel, /Reactivar/);
+  assert.match(adminPanel, /Activar reservas/);
 });

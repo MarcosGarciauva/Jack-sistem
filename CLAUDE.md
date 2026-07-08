@@ -555,10 +555,18 @@ Modulos que requieren revision:
 
 - Se eliminaron del producto activo: Mercado Pago/anticipos reales, WhatsApp automatico con API, recordatorios automaticos, Plan & facturacion, suscripciones reales, SLA/monitoreo comercial completo, backups desde la app, integraciones externas completas, web personalizada por cliente, onboarding 100% autoservicio y reportes avanzados contables.
 - `SettingsEditorial` solo muestra secciones activas: Negocio, Horario de atención, Reservas públicas y Negocios (super_admin).
-- `SettingsBusinessesAdmin` fue rediseñado: KPIs, busqueda, mejor alta de negocios y boton Eliminar.
-- Eliminar negocio es una baja operativa segura: `admin-manage-user` accion `delete_business` marca `businesses.active=false`, apaga `public_site_enabled`, desactiva perfiles vinculados y marca empleados como inactivos. No hard-deletea historico.
+- `SettingsBusinessesAdmin` fue rediseñado como sistema superadmin: KPIs, busqueda, alta de negocios, eliminar/archivar, reactivar, activar/desactivar reservas publicas y abrir `/p/:slug`.
+- Eliminar negocio es una baja operativa segura: `admin-manage-user` accion `delete_business` marca `businesses.active=false`, apaga `public_site_enabled`, desactiva perfiles vinculados y marca empleados como inactivos. `restore_business` reactiva negocio/accesos y `set_business_public_site` controla reservas publicas desde superadmin. No hard-deletea historico.
 - Se eliminaron del repo `supabase/functions/send-whatsapp` y `supabase/functions/send-reminders`. WhatsApp queda exclusivamente manual con `wa.me`.
 - `LegalPage.tsx` contiene terminos y aviso de privacidad integrales para Mexico; deben revisarse con abogado antes de venta masiva.
+
+
+## Actualizacion 2026-07-06 — Superadmin completo
+
+- El superadmin ya no solo crea negocios: administra el ciclo operativo completo desde Configuracion > Negocios.
+- Acciones disponibles: crear negocio + administrador, buscar, eliminar/archivar, reactivar, activar/desactivar reservas publicas y abrir `/p/:slug`.
+- Backend: `admin-manage-user` soporta `delete_business`, `restore_business` y `set_business_public_site`.
+- IMPORTANTE: despues de estos cambios siempre desplegar `supabase functions deploy admin-manage-user`; si no se despliega, Vercel mostrara botones pero Supabase respondera accion no reconocida.
 
 # Pendientes Prioritarios
 

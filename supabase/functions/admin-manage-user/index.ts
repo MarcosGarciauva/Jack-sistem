@@ -10,6 +10,8 @@
 //   action = "delete_employee"        (admin / super_admin del negocio)
 //   action = "create_business_admin"  (solo super_admin)
 //   action = "delete_business"        (solo super_admin; desactiva negocio + accesos)
+//   action = "restore_business"       (solo super_admin; reactiva negocio + accesos)
+//   action = "set_business_public_site" (solo super_admin; activa/desactiva reservas públicas)
 //   action = "complete_onboarding"    (admin del negocio, primer ingreso)
 //
 // Deploy: supabase functions deploy admin-manage-user
@@ -395,7 +397,66 @@ serve(async (req: Request) => {
       return json({ success: true, business: { id: business.id, name: business.name, active: false } });
     }
 
-    // ── 7. Completar onboarding inicial (admin del negocio) ───────────────────
+    // ── 7. Reactivar negocio archivado (solo super_admin) ───────────────────
+    if (action === "restore_business") {
+      if (!isSuperAdmin) return json({ error: "Solo el super admin puede reactivar negocios" }, 403);
+
+      const businessId = String(body.businessId ?? "").trim();
+      if (!businessId) return json({ error: "Negocio no especificado" }, 400);
+
+      const { data: business } = await admin
+        .from("businesses")
+        .select("id, name")
+        .eq("id", businessId)
+        .maybeSingle();
+      if (!business) return json({ error: "Negocio no encontrado" }, 404);
+
+      const now = new Date().toISOString();
+      const { error: bizErr } = await admin
+        .from("businesses")
+        .update({ active: true, updated_at: now })
+        .eq("id", businessId);
+      if (bizErr) return json({ error: "No se pudo reactivar el negocio: " + bizErr.message }, 500);
+
+      await admin
+        .from("profiles")
+        .update({ active: true })
+        .eq("business_id", businessId);
+
+      await admin
+        .from("business_employees")
+        .update({ status: "active", updated_at: now })
+        .eq("business_id", businessId);
+
+      return json({ success: true, business: { id: business.id, name: business.name, active: true } });
+    }
+
+    // ── 8. Activar/desactivar reservas publicas (solo super_admin) ──────────
+    if (action === "set_business_public_site") {
+      if (!isSuperAdmin) return json({ error: "Solo el super admin puede cambiar reservas públicas" }, 403);
+
+      const businessId = String(body.businessId ?? "").trim();
+      const enabled = Boolean(body.enabled);
+      if (!businessId) return json({ error: "Negocio no especificado" }, 400);
+
+      const { data: business } = await admin
+        .from("businesses")
+        .select("id, name, active")
+        .eq("id", businessId)
+        .maybeSingle();
+      if (!business) return json({ error: "Negocio no encontrado" }, 404);
+      if (!business.active && enabled) return json({ error: "No puedes activar reservas públicas en un negocio eliminado" }, 400);
+
+      const { error: bizErr } = await admin
+        .from("businesses")
+        .update({ public_site_enabled: enabled, updated_at: new Date().toISOString() })
+        .eq("id", businessId);
+      if (bizErr) return json({ error: "No se pudo actualizar reservas públicas: " + bizErr.message }, 500);
+
+      return json({ success: true, business: { id: business.id, name: business.name, publicSiteEnabled: enabled } });
+    }
+
+    // ── 9. Completar onboarding inicial (admin del negocio) ───────────────────
     if (action === "complete_onboarding") {
       if (!isAdmin) return json({ error: "Solo un administrador puede completar el onboarding" }, 403);
       const businessId = callerProfile.business_id;

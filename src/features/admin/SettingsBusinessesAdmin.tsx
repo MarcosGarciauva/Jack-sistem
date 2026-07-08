@@ -7,7 +7,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import { useEffect, useMemo, useState } from "react";
-import { Building2, Check, Globe, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { Building2, Check, ExternalLink, Globe, Plus, Power, RefreshCw, RotateCcw, Search, Trash2 } from "lucide-react";
 import { JEmpty } from "../../components/Editorial";
 import { databaseService, type BusinessSummary } from "../../services/databaseService";
 import { BUSINESS_TYPES } from "../../lib/businessOptions";
@@ -84,21 +84,58 @@ export function SettingsBusinessesAdmin({ onToast }: { onToast: (msg: string) =>
     }
   };
 
+  const updateBusinessInList = (businessId: string, patch: Partial<BusinessSummary>) => {
+    setBusinesses((items) => items.map((item) => item.id === businessId ? { ...item, ...patch } : item));
+  };
+
   const deleteBusiness = async (business: BusinessSummary) => {
     const ok = window.confirm(
-      `Eliminar ${business.name}?\n\nEsto desactiva el negocio y las cuentas vinculadas. No borra físicamente el histórico para que puedas recuperarlo si fue un error.`
+      `Eliminar ${business.name}?\n\nEsto desactiva el negocio, bloquea sus cuentas y apaga sus reservas públicas. No borra físicamente el histórico.`
     );
     if (!ok) return;
     setDeletingId(business.id);
     try {
       await databaseService.deleteBusiness(business.id);
-      setBusinesses((items) => items.map((item) => item.id === business.id ? { ...item, active: false, publicSiteEnabled: false } : item));
+      updateBusinessInList(business.id, { active: false, publicSiteEnabled: false });
       onToast("Negocio eliminado de forma segura");
     } catch (err) {
       onToast((err as Error).message || "No se pudo eliminar el negocio");
     } finally {
       setDeletingId(null);
     }
+  };
+
+  const restoreBusiness = async (business: BusinessSummary) => {
+    const ok = window.confirm(`Reactivar ${business.name}?\n\nEsto vuelve a activar el negocio y sus accesos vinculados.`);
+    if (!ok) return;
+    setDeletingId(business.id);
+    try {
+      await databaseService.restoreBusiness(business.id);
+      updateBusinessInList(business.id, { active: true });
+      onToast("Negocio reactivado");
+    } catch (err) {
+      onToast((err as Error).message || "No se pudo reactivar el negocio");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const togglePublicSite = async (business: BusinessSummary) => {
+    if (!business.active) return onToast("No puedes activar reservas públicas en un negocio eliminado");
+    setDeletingId(business.id);
+    try {
+      await databaseService.setManagedBusinessPublicSiteEnabled(business.id, !business.publicSiteEnabled);
+      updateBusinessInList(business.id, { publicSiteEnabled: !business.publicSiteEnabled });
+      onToast(!business.publicSiteEnabled ? "Reservas públicas activadas" : "Reservas públicas desactivadas");
+    } catch (err) {
+      onToast((err as Error).message || "No se pudo actualizar reservas públicas");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const openPublicSite = (business: BusinessSummary) => {
+    window.open(`/p/${business.slug}`, "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -220,14 +257,43 @@ export function SettingsBusinessesAdmin({ onToast }: { onToast: (msg: string) =>
                   <td>{b.active ? <span className="j-tag dot pos">Activo</span> : <span className="j-tag dot neg">Eliminado</span>}</td>
                   <td>{b.publicSiteEnabled ? <span className="j-tag dot pos"><Globe size={11} /> Activas</span> : <span className="j-tag">No</span>}</td>
                   <td style={{ textAlign: "right" }}>
-                    <button
-                      className="j-btn j-btn-sm"
-                      onClick={() => deleteBusiness(b)}
-                      disabled={!b.active || deletingId === b.id}
-                      title="Desactiva el negocio y sus accesos"
-                    >
-                      <Trash2 size={12} /> {deletingId === b.id ? "Eliminando…" : "Eliminar"}
-                    </button>
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, flexWrap: "wrap" }}>
+                      <button
+                        className="j-btn j-btn-sm"
+                        onClick={() => togglePublicSite(b)}
+                        disabled={!b.active || deletingId === b.id}
+                        title={b.publicSiteEnabled ? "Desactivar reservas públicas" : "Activar reservas públicas"}
+                      >
+                        <Power size={12} /> {b.publicSiteEnabled ? "Apagar reservas" : "Activar reservas"}
+                      </button>
+                      <button
+                        className="j-btn j-btn-sm"
+                        onClick={() => openPublicSite(b)}
+                        disabled={!b.publicSiteEnabled || !b.active}
+                        title="Abrir página pública de reservas"
+                      >
+                        <ExternalLink size={12} /> Ver
+                      </button>
+                      {b.active ? (
+                        <button
+                          className="j-btn j-btn-sm"
+                          onClick={() => deleteBusiness(b)}
+                          disabled={deletingId === b.id}
+                          title="Desactiva el negocio y sus accesos"
+                        >
+                          <Trash2 size={12} /> {deletingId === b.id ? "Eliminando…" : "Eliminar"}
+                        </button>
+                      ) : (
+                        <button
+                          className="j-btn j-btn-sm"
+                          onClick={() => restoreBusiness(b)}
+                          disabled={deletingId === b.id}
+                          title="Reactivar negocio archivado"
+                        >
+                          <RotateCcw size={12} /> {deletingId === b.id ? "Reactivando…" : "Reactivar"}
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
